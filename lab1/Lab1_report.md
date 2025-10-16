@@ -34,13 +34,13 @@
 
 - 第二个终端，我们输入`make gdb`。在指导书中，我们了解到这个命令其实是一系列操作的集合：
 
-	“`file bin/kernel`：让`GDB`加载我们编译好的内核文件，这个文件里包含宝贵的调试符号（函数名、变量名等）。
+   “`file bin/kernel`：让`GDB`加载我们编译好的内核文件，这个文件里包含宝贵的调试符号（函数名、变量名等）。
 
-	​     `set arch riscv:rv64`：告诉`GDB`，我们要调试的是`RISC-V 64`位的程序。
+   ​     `set arch riscv:rv64`：告诉`GDB`，我们要调试的是`RISC-V 64`位的程序。
 
-	​     `target remote localhost:1234`：让`GDB`去连接本机（`localhost`）的`1234`端口，也就是`QEMU`正在等待我们的地方。”
+   ​     `target remote localhost:1234`：让`GDB`去连接本机（`localhost`）的`1234`端口，也就是`QEMU`正在等待我们的地方。”
 
-	​     输入命令后，它的显示中有两行是：
+   ​     输入命令后，它的显示中有两行是：
 
  “`Remote debugging using localhost:1234`
 
@@ -83,41 +83,43 @@
 
 输入命令`(gdb)i r`查看所有寄存器的值，输出如下：
 
-“`ra             0x80000a02       0x80000a02`
-`sp             0x8001bd80       0x8001bd80`
-`gp             0x0      0x0`
-`tp             0x8001be00       0x8001be00`
-`t0             0x80200000       2149580800`
-`t1             0x1      1`
-`t2             0x1      1`
-`fp             0x8001bd90       0x8001bd90`
-`s1             0x8001be00       2147597824`
-`a0             0x0      0`
-`a1             0x82200000       2183135232`
-`a2             0x80200000       2149580800`
-`a3             0x1      1`
-`a4             0x800    2048`
-`a5             0x1      1`
-`a6             0x82200000       2183135232`
-`a7             0x80200000       2149580800`
-`s2             0x800095c0       2147521984`
-`s3             0x0      0`
-`s4             0x0      0`
-`s5             0x0      0`
-`--Type <RET> for more, q to quit, c to continue without paging--c`
-`s6             0x0      0`
-`s7             0x8      8`
-`s8             0x2000   8192`
-`s9             0x0      0`
-`s10            0x0      0`
-`s11            0x0      0`
-`t3             0x0      0`
-`t4             0x0      0`
-`t5             0x0      0`
-`t6             0x82200000       2183135232`
-`pc             0x80200000       0x80200000 <kern_entry>`
-`dscratch       Could not fetch register "dscratch"; remote failure reply 'E14'`
-`mucounteren    Could not fetch register "mucounteren"; remote failure reply 'E14'`”
+```bash
+ra             0x80000a02       0x80000a02
+sp             0x8001bd80       0x8001bd80
+gp             0x0      0x0
+tp             0x8001be00       0x8001be00
+t0             0x80200000       2149580800
+t1             0x1      1
+t2             0x1      1
+fp             0x8001bd90       0x8001bd90
+s1             0x8001be00       2147597824
+a0             0x0      
+a1             0x82200000       2183135232
+a2             0x80200000       2149580800
+a3             0x1      1
+a4             0x800    2048
+a5             0x1      1
+a6             0x82200000       2183135232
+a7             0x80200000       2149580800
+s2             0x800095c0       2147521984
+s3             0x0      0
+s4             0x0      0
+s5             0x0      0
+--Type <RET> for more, q to quit, c to continue without paging--c
+s6             0x0      0
+s7             0x8      8
+s8             0x2000   8192
+s9             0x0      0
+s10            0x0      0
+s11            0x0      0
+t3             0x0      0
+t4             0x0      0
+t5             0x0      0
+t6             0x82200000       2183135232
+pc             0x80200000       0x80200000 <kern_entry>
+dscratch       Could not fetch register "dscratch"; remote failure reply 'E14'
+mucounteren    Could not fetch register "mucounteren"; remote failure reply 'E14'
+```
 
 至此，实验流程已经全部复现。
 
@@ -129,17 +131,19 @@
 
 首先，QEMU 模拟器启动后，会模拟加电复位过程，此时PC寄存器会被强制复位为**`0x1000`**。我们运行`make gdb`启动之后，RISC-V模拟器首先停止在`0x1000`这个地址，我们可以采用`x/10i $pc`命令进行反汇编来查看`0x1000`处的指令序列：
 
-”`(gdb) x/10i $pc`
-`=> 0x1000:      auipc   t0,0x0`
-   `0x1004:      addi    a1,t0,32`
-   `0x1008:      csrr    a0,mhartid`
-   `0x100c:      ld      t0,24(t0)`
-   `0x1010:      jr      t0`
-   `0x1014:      unimp`
-   `0x1016:      unimp`
-   `0x1018:      unimp`
-   `0x101a:      .insn   2, 0x8000`
-   `0x101c:      unimp`“
+```bash
+(gdb) x/10i $pc
+=> 0x1000:      auipc   t0,0x0
+   0x1004:      addi    a1,t0,32
+   0x1008:      csrr    a0,mhartid
+   0x100c:      ld      t0,24(t0)
+   0x1010:      jr      t0
+   0x1014:      unimp
+   0x1016:      unimp
+   0x1018:      unimp
+   0x101a:      .insn   2, 0x8000
+   0x101c:      unimp
+```
 
 这些指令是OpenSBI固件的开始部分，主要完成以下操作：
 
@@ -156,20 +160,22 @@
 
 为了验证`0x1010`这里的跳转指令是否真的是跳转到**`0x80000000`**处，我们可以通过命令`si`以单条汇编指令为步长进行单步执行，通过命令`i r t0`来查看t0寄存器的值：
 
-“`(gdb) i r t0`
-`t0             0x0      0`
-`(gdb) si`
-`0x0000000000001004 in ?? ()`
-`(gdb) si`
-`0x0000000000001008 in ?? ()`
-`(gdb) si`
-`0x000000000000100c in ?? ()`
-`(gdb) si`
-`0x0000000000001010 in ?? ()`
-`(gdb) si`
-`0x0000000080000000 in ?? ()`
-`(gdb) i r t0`
-`t0             0x80000000       2147483648`”
+```bash
+(gdb) i r t0
+t0             0x0      0
+(gdb) si
+0x0000000000001004 in ?? ()
+(gdb) si
+0x0000000000001008 in ?? ()
+(gdb) si
+0x000000000000100c in ?? ()
+(gdb) si
+0x0000000000001010 in ?? ()
+(gdb) si
+0x0000000080000000 in ?? ()
+(gdb) i r t0
+t0             0x80000000       2147483648
+```
 
 可以看到，t0寄存器初始时为0x0，在执行完`ld t0,24(t0)`这条指令之后，t0寄存器的值变为`0x80000000`，之后再执行`jr t0`，就跳转到OpenSBI固件的初始地址处。除此之外，我们也可以运行命令`x/xg 0x1018`直接查看`0x1018`这个地址处保存的值，也同样为`0x80000000`。
 
@@ -177,23 +183,25 @@
 
 同样的，在**`0x80000000`**这个地址处，我们也运行命令`x/10i $pc`，查看接下来的10条指令。在此之前，要在`0x80000000`处打下一个断点，通过`b *0x80000000`完成这个操作，接着`continue`就可以停止在`0x80000000`这个位置：
 
-”`(gdb) b *0x80000000`
-`Breakpoint 1 at 0x80000000`
-`(gdb) c`
-`Continuing.`
+```bash
+(gdb) b *0x80000000
+Breakpoint 1 at 0x80000000
+(gdb) c
+Continuing.
 
-`Breakpoint 1, 0x0000000080000000 in ?? ()`
-`(gdb) x/10i $pc`
-`=> 0x80000000:  csrr    a6,mhartid`
-   `0x80000004:  bgtz    a6,0x80000108`
-   `0x80000008:  auipc   t0,0x0`
-   `0x8000000c:  addi    t0,t0,1032`
-   `0x80000010:  auipc   t1,0x0`
-   `0x80000014:  addi    t1,t1,-16`
-   `0x80000018:  sd      t1,0(t0)`
-   `0x8000001c:  auipc   t0,0x0`
-   `0x80000020:  addi    t0,t0,1020`
-   `0x80000024:  ld      t0,0(t0)`“
+Breakpoint 1, 0x0000000080000000 in ?? ()
+(gdb) x/10i $pc
+=> 0x80000000:  csrr    a6,mhartid
+   0x80000004:  bgtz    a6,0x80000108
+   0x80000008:  auipc   t0,0x0
+   0x8000000c:  addi    t0,t0,1032
+   0x80000010:  auipc   t1,0x0
+   0x80000014:  addi    t1,t1,-16
+   0x80000018:  sd      t1,0(t0)
+   0x8000001c:  auipc   t0,0x0
+   0x80000020:  addi    t0,t0,1020
+   0x80000024:  ld      t0,0(t0)
+```
 
 这些指令是OpenSBI的初始化代码，由于OpenSBI初始化操作的指令数量太多，我们只列出来一部分。在进行完初始化操作之后，OpenSBI 就会准备开始加载并启动操作系统内核。
 
@@ -201,28 +209,32 @@
 
 OpenSBI完成相关操作之后，就会跳转到**`0x80200000`**这个地址，开始执行操作系统的初始化代码。同样，我们通过`b *0x80200000`在这里打下断点，然后`continue`执行到这一点。
 
-“`(gdb) b *0x80200000`
-`Breakpoint 2 at 0x80200000: file kern/init/entry.S, line 7.`
-`(gdb) c`
-`Continuing.`
+```bash
+(gdb) b *0x80200000
+Breakpoint 2 at 0x80200000: file kern/init/entry.S, line 7.
+(gdb) c
+Continuing.
 
-`Breakpoint 2, kern_entry () at kern/init/entry.S:7`
-`7           la sp, bootstacktop`”
+Breakpoint 2, kern_entry () at kern/init/entry.S:7
+7           la sp, bootstacktop
+```
 
 接着，通过`x/10i $pc`查看接下来的十条指令，这是`kern_entry`的开始：
 
-“`(gdb) x/10i $pc`
+```bash
+(gdb) x/10i $pc
 
-`=> 0x80200000 <kern_entry>:     auipc   sp,0x3`
-   `0x80200004 <kern_entry+4>:   mv      sp,sp`
-   `0x80200008 <kern_entry+8>:   j       0x8020000a <kern_init>`
-   `0x8020000a <kern_init>:      auipc   a0,0x3`
-   `0x8020000e <kern_init+4>:    addi    a0,a0,-2`
-   `0x80200012 <kern_init+8>:    auipc   a2,0x3`
-   `0x80200016 <kern_init+12>:   addi    a2,a2,-10`
-   `0x8020001a <kern_init+16>:   addi    sp,sp,-16`
-   `0x8020001c <kern_init+18>:   li      a1,0`
-   `0x8020001e <kern_init+20>:   sub     a2,a2,a0`”
+=> 0x80200000 <kern_entry>:     auipc   sp,0x3
+   0x80200004 <kern_entry+4>:   mv      sp,sp
+   0x80200008 <kern_entry+8>:   j       0x8020000a <kern_init>
+   0x8020000a <kern_init>:      auipc   a0,0x3
+   0x8020000e <kern_init+4>:    addi    a0,a0,-2
+   0x80200012 <kern_init+8>:    auipc   a2,0x3
+   0x80200016 <kern_init+12>:   addi    a2,a2,-10
+   0x8020001a <kern_init+16>:   addi    sp,sp,-16
+   0x8020001c <kern_init+18>:   li      a1,0
+   0x8020001e <kern_init+20>:   sub     a2,a2,a0
+```
 
 通过与entry.s对照，`0x80200000`处的指令是`auipc sp,0x3`，对应的就是`la sp, bootstacktop`这条指令，为C语言函数调用分配栈空间，准备C语言运行环境。
 
@@ -239,12 +251,12 @@ OpenSBI完成相关操作之后，就会跳转到**`0x80200000`**这个地址，
 ### Q2：它们主要完成了哪些功能？
 
 - `0x1000`处的指令是OpenSBI固件的入口，主要完成：
-	1. 设置设备树地址（DTB）到a1寄存器，用于之后内核解析DTB，并根据其中的信息来初始化硬件。
-	2. 读取当前硬件线程ID（mhartid）到a0寄存器。
-	3. 从`0x1018`处加载OpenSBI主要代码的地址，并跳转到该地址（`0x80000000`）。
+   1. 设置设备树地址（DTB）到a1寄存器，用于之后内核解析DTB，并根据其中的信息来初始化硬件。
+   2. 读取当前硬件线程ID（mhartid）到a0寄存器。
+   3. 从`0x1018`处加载OpenSBI主要代码的地址，并跳转到该地址（`0x80000000`）。
 - `0x80000000`处的OpenSBI代码主要完成：
-	1. OpenSBI的初始化。
-	2. 完成初始化操作之后，将控制权转交给操作系统内核（跳转到`0x80200000`）。
+   1. OpenSBI的初始化。
+   2. 完成初始化操作之后，将控制权转交给操作系统内核（跳转到`0x80200000`）。
 
 通过以上步骤，硬件加电后经过OpenSBI固件的初始化，最终将控制权转交给操作系统内核。
 
