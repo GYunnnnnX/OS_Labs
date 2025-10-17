@@ -113,21 +113,81 @@ Best-Fit 算法在空闲块中找到 **最小的、能满足请求的块**，能
 
 内存块按 **2 的幂次**划分（1、2、4、8 页…），每个空闲块都有一个“伙伴”块。分配时选择最小可容纳请求的幂次块。按 2 的幂次管理块，天生支持按大小快速查找，合并和拆分快速，适合物理页分配场景（尤其内核）。
 
-
-
-
-
 ## 练习二：实现 Best-Fit 连续物理内存分配算法
 
+对于内存映射初始化以及内存释放的两个函数，我们保留first fit的使用即可。
 
+### best_fit_init_memmap
 
-## 扩展练习Challenge：buddy system（伙伴系统）分配算法
+```
+// 清空当前页框的标志和属性信息，并将页框的引用计数设置为0
+p->flags = p->property = 0;
+set_page_ref(p, 0);
+```
 
+```
+// 1、当base < page时，找到第一个大于base的页，将base插入到它前面，并退出循环
+// 2、当list_next(le) == &free_list时，若已经到达链表结尾，将base插入到链表尾部
+if (base < page) {
+    list_add_before(le, &(base->page_link));
+    break;
+} else if (list_next(le) == &free_list) {
+    list_add(le, &(base->page_link));
+}
+```
 
+### best_fit_alloc_pages
 
-## 扩展练习Challenge：任意大小的内存单元slub分配算法
+```
+// 遍历空闲链表，查找满足需求的空闲页框
+// 如果找到满足需求的页面，记录该页面以及当前找到的最小连续空闲页框数量
+while ((le = list_next(le)) != &free_list) {
+    struct Page *p = le2page(le, page_link);
+    if (p->property >= n) {
+        size_t gap = p->property - n;
+        if (gap == 0) {  // 完美匹配，直接返回
+            page = p;
+            break;
+        }
+        if (gap < min_size) {
+            min_size = gap;
+            page = p;
+        }
+    }
+}
+```
 
+与first fit只需找到第一个大小足够的块即可不同，best fit算法需要遍历所有块找到最匹配的一个，这会使得其与first fit相比，内存碎片会少一些，但是分配速度也会相应地变慢。
 
+### best_fit_free_pages
 
-## 扩展练习Challenge：硬件的可用物理内存范围的获取方法
+```
+// 具体来说就是设置当前页块的属性为释放的页块数、并将当前页块标记为已分配状态、最后增加nr_free的值
+base->property = n;
+SetPageProperty(base);
+nr_free += n;
+```
+
+```
+// 1、判断前面的空闲页块是否与当前页块是连续的，如果是连续的，则将当前页块合并到前面的空闲页块中
+// 2、首先更新前一个空闲页块的大小，加上当前页块的大小
+// 3、清除当前页块的属性标记，表示不再是空闲页块
+// 4、从链表中删除当前页块
+// 5、将指针指向前一个空闲页块，以便继续检查合并后的连续空闲页块
+if (p + p->property == base) {
+    p->property += base->property;
+    ClearPageProperty(base);
+    list_del(&(base->page_link));
+    base = p;
+}
+```
+
+优化：当已经找到最合适的块之后，停止循环，避免多余的访问开销。
+
+```
+if (gap == 0) {  // 完美匹配，直接返回
+    page = p;
+    break;
+}
+```
 
