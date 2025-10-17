@@ -11,7 +11,7 @@
 #include <string.h>
 #include <riscv.h>
 #include <dtb.h>
-
+#include <slub_pmm.h>
 // virtual address of physical page array
 struct Page *pages;
 // amount of physical memory (in pages)
@@ -116,6 +116,23 @@ void pmm_init(void) {
 
     // use pmm->check to verify the correctness of the alloc/free function in a pmm
     check_alloc_page();
+
+    // ========== 新增: 初始化和测试SLUB分配器 ==========
+    cprintf("\n");
+    cprintf("=====================================\n");
+    cprintf("Initializing SLUB Allocator...\n");
+    cprintf("=====================================\n");
+    
+    // 初始化SLUB
+    slub_init();
+    
+    // 运行SLUB测试
+    slub_check();
+    
+    cprintf("=====================================\n");
+    cprintf("SLUB Allocator Ready!\n");
+    cprintf("=====================================\n\n");
+    // =====================================================
 
     extern char boot_page_table_sv39[];
     satp_virtual = (pte_t*)boot_page_table_sv39;
