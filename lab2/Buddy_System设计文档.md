@@ -4,19 +4,19 @@
 
 ### 关键数据结构：
 
-```
+```c++
 typedef struct {
     list_entry_t free_list;         // 自由链表的头节点
     unsigned int nr_free;           // 该阶空闲块的数量
 } free_area_t;
 ```
 
-```
+```c++
 #define MAX_ORDER  4      // 最大阶数
 static free_area_t free_area[MAX_ORDER + 1]; // 每个阶的自由区
 ```
 
-```
+```c++
 struct Page {
     int ref;                        // page frame's reference counter
     uint64_t flags;                 // array of flags that describe the status of the page frame
@@ -35,7 +35,7 @@ struct Page {
 
 ### 头文件引入与全局定义
 
-```
+```C++
 #include <pmm.h>
 #include <list.h>
 #include <string.h>
@@ -51,32 +51,32 @@ static free_area_t free_area[MAX_ORDER + 1]; // 每个阶的自由区
 
 ### 功能函数
 
-```
+```C++
 // 获取总空闲页数
 static size_t get_nr_free(void) 
 ```
 
-```
+```C++
 // 计算阶数：找到能容纳n页的最小2的幂
 static unsigned int get_order(size_t n)
 ```
 
-```
+```C++
 // 检查页面是否在自由链表中
 static int page_in_free_list(struct Page *page) 
 ```
 
-```
+```C++
 // 检查是否是伙伴关系
 static int is_buddy(struct Page *page, unsigned int order) 
 ```
 
-```
+```C++
 // 找到伙伴页
 static struct Page *get_buddy(struct Page *page) 
 ```
 
-```
+```C++
 // 对外接口：获取总空闲页数
 static size_t buddy_nr_free_pages(void) {
     return get_nr_free();
@@ -89,7 +89,7 @@ static size_t buddy_nr_free_pages(void) {
 
 ### **初始化阶段**
 
-```
+```C++
 函数 buddy_init():
     对于 i 从 0 到 MAX_ORDER:
         初始化 free_area[i].free_list 为空链表
@@ -100,7 +100,7 @@ static size_t buddy_nr_free_pages(void) {
 - 对每个阶数i（从0到`MAX_ORDER`），初始化该阶的自由链表并将该阶的空闲块数量置为0，后续可直接通过**O(1)访问**特定大小的自由链表。
 - 这是伙伴系统开始管理内存前的必要步骤，确保所有自由链表为空，后续可以正确添加空闲块。
 
-```
+```C++
 函数 buddy_init_memmap(base, n):
     断言 n > 0
     
@@ -145,7 +145,7 @@ static size_t buddy_nr_free_pages(void) {
 
 ### **分配流程**
 
-```
+```C++
 函数 buddy_alloc_pages(n):
     断言 n > 0
     如果 n > 总空闲页数:
@@ -205,7 +205,7 @@ static size_t buddy_nr_free_pages(void) {
 
 ### **释放流程**
 
-```
+```C++
 函数 buddy_free_pages(base, n):
     断言 n > 0
     
