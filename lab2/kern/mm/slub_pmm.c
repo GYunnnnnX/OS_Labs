@@ -1,536 +1,286 @@
 #include <slub_pmm.h>
-#include <pmm.h>
-#include <list.h>
+#include <default_pmm.h>
 #include <string.h>
-#include <stdio.h>
-#define le2slab(le, member)  to_struct((le), slub_slab_t, member)
+#include <assert.h>
 
-/* SLUB分配器实现
- * 两层架构:
- * 1. 第一层: 使用buddy system分配整页(4KB)
- * 2. 第二层: 在页内分配任意大小的内存块
- */
+// ================== 基础配置 ==================
+#define KMALLOC_MIN_SIZE   8
+#define KMALLOC_MAX_SIZE   (PGSIZE / 2)
+#define KMALLOC_CACHES_NUM 10
 
-// 定义size class: 8, 16, 32, 64, 128, 256, 512, 1024, 2048字节
-#define SLUB_MIN_SIZE      8
-#define SLUB_MAX_SIZE      2048
-#define SLUB_SIZE_CLASSES  9
+static list_entry_t kmem_caches;
+static struct kmem_cache *kmalloc_caches[KMALLOC_CACHES_NUM];
+static int kmalloc_caches_inited = 0;   // 延迟初始化标志
 
-// 每个size class的大小
-static const size_t size_classes[SLUB_SIZE_CLASSES] = {
-    8, 16, 32, 64, 128, 256, 512, 1024, 2048
-};
+extern const struct pmm_manager default_pmm_manager;
+#define page_alloc(n)       default_pmm_manager.alloc_pages(n)
+#define page_free(p, n)     default_pmm_manager.free_pages(p, n)
+#define page_nr_free()      default_pmm_manager.nr_free_pages()
 
-// SLUB对象头(用于空闲对象链表)
-typedef struct slub_object {
-    struct slub_object *next;
-} slub_object_t;
+extern uint64_t va_pa_offset;
 
-// SLUB slab结构(管理一个页)
-typedef struct slub_slab {
-    list_entry_t slab_link;      // 链接到kmem_cache的slab链表
-    void *page_addr;             // 页的起始地址
-    struct Page *page;           // 对应的Page结构
-    slub_object_t *freelist;     // 空闲对象链表
-    unsigned int inuse;          // 已分配对象数
-    unsigned int objects;        // 总对象数
-    unsigned int size;           // 对象大小
-} slub_slab_t;
-
-// SLUB缓存结构(每个size class一个)
-typedef struct kmem_cache {
-    size_t size;                 // 对象大小
-    size_t objects_per_slab;     // 每个slab的对象数
-    list_entry_t partial_slabs;  // 部分使用的slab链表
-    list_entry_t full_slabs;     // 完全使用的slab链表
-    list_entry_t free_slabs;     // 完全空闲的slab链表
-    unsigned int nr_slabs;       // slab总数
-    unsigned int nr_objs;        // 对象总数
-    unsigned int nr_free;        // 空闲对象数
-} kmem_cache_t;
-
-// 每个size class的缓存
-static kmem_cache_t kmem_caches[SLUB_SIZE_CLASSES];
-
-// 大对象分配记录(超过2048字节)
-#define MAX_LARGE_ALLOCS 64
-typedef struct {
-    void *addr;
-    size_t size;
-    size_t pages;
-} large_alloc_t;
-
-static large_alloc_t large_allocs[MAX_LARGE_ALLOCS];
-static int nr_large_allocs = 0;
-
-// 获取size对应的cache索引
-static int get_cache_index(size_t size) {
-    for (int i = 0; i < SLUB_SIZE_CLASSES; i++) {
-        if (size <= size_classes[i]) {
-            return i;
-        }
-    }
-    return -1;
+// ================== 地址换算 ==================
+static inline void *page2kva(struct Page *p) {
+    return (void *)(page2pa(p) + va_pa_offset);
+}
+static inline struct Page *kva2page(void *kva) {
+    return pa2page(PADDR(kva));
 }
 
-// 初始化一个slab
-static slub_slab_t* init_slab(kmem_cache_t *cache) {
-    // 从buddy system分配一页
-    struct Page *page = alloc_page();
-    if (page == NULL) {
-        return NULL;
-    }
-    
-    // 计算页的虚拟地址
-    void *page_addr = (void *)((uintptr_t)pages + 
-                               (page - pages) * sizeof(struct Page));
-    
-    // 在页的开头放置slab管理结构
-    slub_slab_t *slab = (slub_slab_t *)page_addr;
-    slab->page = page;
-    slab->page_addr = page_addr;
-    slab->size = cache->size;
-    slab->inuse = 0;
-    
-    // 计算可用空间和对象数量
-    size_t available = PGSIZE - sizeof(slub_slab_t);
-    slab->objects = available / cache->size;
-    cache->objects_per_slab = slab->objects;
-    
-    // 初始化空闲对象链表
-    char *obj_start = (char *)page_addr + sizeof(slub_slab_t);
-    slab->freelist = NULL;
-    
-    for (unsigned int i = 0; i < slab->objects; i++) {
-        slub_object_t *obj = (slub_object_t *)(obj_start + i * cache->size);
-        obj->next = slab->freelist;
-        slab->freelist = obj;
-    }
-    
-    list_add(&cache->free_slabs, &slab->slab_link);
-    cache->nr_slabs++;
-    cache->nr_objs += slab->objects;
-    cache->nr_free += slab->objects;
-    
-    return slab;
+// ================== slab 辅助 ==================
+static inline void *slab_idx_to_obj(struct slab *s, size_t idx) {
+    uintptr_t base = (uintptr_t)page2kva(s->s_page);
+    return (void *)(base + sizeof(struct slab) + s->cache->objsize * idx);
+}
+static inline struct slab *obj_to_slab(void *obj) {
+    struct Page *page = kva2page(obj);
+    return (struct slab *)page2kva(page);
 }
 
-// 初始化SLUB分配器
+static void slab_init(struct kmem_cache *cache, struct slab *s, struct Page *page) {
+    s->magic  = SLAB_HDR_MAGIC;
+    s->cache  = cache;
+    s->s_page = page;
+    s->inuse  = 0;
+    s->num_objs = (PGSIZE - sizeof(struct slab)) / cache->objsize;
+    assert(s->num_objs > 0);
+    s->free_list = NULL;
+    for (size_t i = 0; i < s->num_objs; i++) {
+        void *obj = slab_idx_to_obj(s, i);
+        *(void **)obj = s->free_list;
+        s->free_list = obj;
+    }
+}
+
+// ================== 初始化与 cache 创建 ==================
+static inline void *kcache_alloc_meta(void) {
+    struct Page *p = page_alloc(1);
+    return p ? page2kva(p) : NULL;
+}
+static inline void kcache_free_meta(void *meta) {
+    if (!meta) return;
+    page_free(kva2page(meta), 1);
+}
+
 void slub_init(void) {
-    cprintf("Initializing SLUB allocator...\n");
-    
-    for (int i = 0; i < SLUB_SIZE_CLASSES; i++) {
-        kmem_cache_t *cache = &kmem_caches[i];
-        cache->size = size_classes[i];
-        cache->objects_per_slab = 0;
-        list_init(&cache->partial_slabs);
-        list_init(&cache->full_slabs);
-        list_init(&cache->free_slabs);
-        cache->nr_slabs = 0;
-        cache->nr_objs = 0;
-        cache->nr_free = 0;
-        
-        cprintf("  Size class %d: %d bytes\n", i, (int)cache->size);
-    }
-    
-    // 初始化大对象分配记录
-    for (int i = 0; i < MAX_LARGE_ALLOCS; i++) {
-        large_allocs[i].addr = NULL;
-        large_allocs[i].size = 0;
-        large_allocs[i].pages = 0;
-    }
-    nr_large_allocs = 0;
-    
-    cprintf("SLUB allocator initialized!\n");
+    list_init(&kmem_caches);
 }
 
-// 从slab分配对象
-static void* alloc_from_slab(slub_slab_t *slab, kmem_cache_t *cache) {
-    if (slab->freelist == NULL) {
-        return NULL;
-    }
-    
-    // 从空闲链表取出一个对象
-    slub_object_t *obj = slab->freelist;
-    slab->freelist = obj->next;
-    slab->inuse++;
-    cache->nr_free--;
-    
-    // 如果slab变满,移到full链表
-    if (slab->freelist == NULL) {
-        list_del(&slab->slab_link);
-        list_add(&cache->full_slabs, &slab->slab_link);
-    }
-    
-    return (void *)obj;
+struct kmem_cache *kmem_cache_create(
+    const char *name, size_t objsize, size_t align,
+    void (*ctor)(void *), void (*dtor)(void *)) {
+
+    if (objsize < sizeof(void *)) objsize = sizeof(void *);
+    if (align > 0 && (objsize % align) != 0)
+        objsize = (objsize / align + 1) * align;
+
+    struct kmem_cache *cache = (struct kmem_cache *)kcache_alloc_meta();
+    if (!cache) return NULL;
+
+    memset(cache, 0, sizeof(*cache));
+    cache->name = name;
+    cache->objsize = objsize;
+    cache->ctor = ctor;
+    cache->dtor = dtor;
+    list_init(&cache->slabs_full);
+    list_init(&cache->slabs_partial);
+    list_init(&cache->slabs_empty);
+
+    list_add_before(&kmem_caches, &cache->kmem_cache_link);
+    cprintf("kmem_cache_create: %s, objsize=%u\n", name, (unsigned int)objsize);
+    return cache;
 }
 
-// SLUB分配
-void* slub_alloc(size_t size) {
-    if (size == 0) {
-        return NULL;
+void kmem_cache_destroy(struct kmem_cache *cache) {
+    list_entry_t *le, *next;
+    le = list_next(&cache->slabs_full);
+    while (le != &cache->slabs_full) {
+        next = list_next(le);
+        struct slab *s = container_of(le, struct slab, slab_link);
+        list_del(le);
+        page_free(s->s_page, 1);
+        le = next;
     }
-    
-    // 对于大对象(>2048字节),直接使用buddy system
-    if (size > SLUB_MAX_SIZE) {
-        size_t pages_needed = (size + PGSIZE - 1) / PGSIZE;
-        struct Page *page = alloc_pages(pages_needed);
-        if (page == NULL) {
-            return NULL;
-        }
-        
-        // 记录大对象分配
-        if (nr_large_allocs < MAX_LARGE_ALLOCS) {
-            void *addr = (void *)((uintptr_t)pages + 
-                                 (page - pages) * sizeof(struct Page));
-            large_allocs[nr_large_allocs].addr = addr;
-            large_allocs[nr_large_allocs].size = size;
-            large_allocs[nr_large_allocs].pages = pages_needed;
-            nr_large_allocs++;
-            return addr;
-        }
-        return NULL;
+    le = list_next(&cache->slabs_partial);
+    while (le != &cache->slabs_partial) {
+        next = list_next(le);
+        struct slab *s = container_of(le, struct slab, slab_link);
+        list_del(le);
+        page_free(s->s_page, 1);
+        le = next;
     }
-    
-    // 获取对应的cache
-    int cache_idx = get_cache_index(size);
-    if (cache_idx < 0) {
-        return NULL;
+    le = list_next(&cache->slabs_empty);
+    while (le != &cache->slabs_empty) {
+        next = list_next(le);
+        struct slab *s = container_of(le, struct slab, slab_link);
+        list_del(le);
+        page_free(s->s_page, 1);
+        le = next;
     }
-    
-    kmem_cache_t *cache = &kmem_caches[cache_idx];
-    
-    // 优先从partial slab分配
-    if (!list_empty(&cache->partial_slabs)) {
-        list_entry_t *le = list_next(&cache->partial_slabs);
-        slub_slab_t *slab = le2slab(le, slab_link);
-        void *obj = alloc_from_slab(slab, cache);
-        if (obj != NULL) {
-            return obj;
-        }
-    }
-    
-    // 尝试从free slab分配
-    if (!list_empty(&cache->free_slabs)) {
-        list_entry_t *le = list_next(&cache->free_slabs);
-        slub_slab_t *slab = le2slab(le, slab_link);
-        
-        // 移到partial链表
-        list_del(&slab->slab_link);
-        list_add(&cache->partial_slabs, &slab->slab_link);
-        
-        void *obj = alloc_from_slab(slab, cache);
-        if (obj != NULL) {
-            return obj;
-        }
-    }
-    
-    // 需要分配新slab
-    slub_slab_t *new_slab = init_slab(cache);
-    if (new_slab == NULL) {
-        return NULL;
-    }
-    
-    // 移到partial链表
-    list_del(&new_slab->slab_link);
-    list_add(&cache->partial_slabs, &new_slab->slab_link);
-    
-    return alloc_from_slab(new_slab, cache);
+    list_del(&cache->kmem_cache_link);
+    kcache_free_meta(cache);
 }
 
-// 查找对象所属的slab
-static slub_slab_t* find_slab(void *ptr, kmem_cache_t **cache_out) {
-    for (int i = 0; i < SLUB_SIZE_CLASSES; i++) {
-        kmem_cache_t *cache = &kmem_caches[i];
-        
-        // 检查所有链表
-        list_entry_t *lists[] = {
-            &cache->partial_slabs,
-            &cache->full_slabs,
-            &cache->free_slabs
-        };
-        
-        for (int j = 0; j < 3; j++) {
-            list_entry_t *head = lists[j];
-            list_entry_t *le = list_next(head);
-            
-            while (le != head) {
-                slub_slab_t *slab = le2slab(le, slab_link);
-                
-                // 检查ptr是否在这个slab的范围内
-                if (ptr >= slab->page_addr && 
-                    ptr < (void *)((char *)slab->page_addr + PGSIZE)) {
-                    if (cache_out) {
-                        *cache_out = cache;
-                    }
-                    return slab;
-                }
-                
-                le = list_next(le);
-            }
-        }
+// ================== 分配/释放 ==================
+void *kmem_cache_alloc(struct kmem_cache *cache) {
+    struct slab *s = NULL;
+    if (!list_empty(&cache->slabs_partial))
+        s = container_of(list_next(&cache->slabs_partial), struct slab, slab_link);
+    else if (!list_empty(&cache->slabs_empty)) {
+        s = container_of(list_next(&cache->slabs_empty), struct slab, slab_link);
+        list_del(&s->slab_link);
+        list_add(&cache->slabs_partial, &s->slab_link);
+    } else {
+        struct Page *page = page_alloc(1);
+        if (!page) return NULL;
+        s = (struct slab *)page2kva(page);
+        slab_init(cache, s, page);
+        list_add(&cache->slabs_partial, &s->slab_link);
     }
-    
+
+    assert(s && s->magic == SLAB_HDR_MAGIC && s->free_list);
+    void *obj = s->free_list;
+    s->free_list = *(void **)obj;
+    s->inuse++;
+
+    if (s->inuse == s->num_objs) {
+        list_del(&s->slab_link);
+        list_add(&cache->slabs_full, &s->slab_link);
+    }
+
+    if (cache->ctor) cache->ctor(obj);
+    return obj;
+}
+
+void kmem_cache_free(struct kmem_cache *cache, void *obj) {
+    if (!obj) return;
+    if (cache->dtor) cache->dtor(obj);
+    struct slab *s = obj_to_slab(obj);
+    assert(s && s->magic == SLAB_HDR_MAGIC && s->cache == cache);
+    *(void **)obj = s->free_list;
+    s->free_list = obj;
+    s->inuse--;
+
+    if (s->inuse == 0) {
+        list_del(&s->slab_link);
+        list_add(&cache->slabs_empty, &s->slab_link);
+    } else if (s->inuse == s->num_objs - 1) {
+        list_del(&s->slab_link);
+        list_add(&cache->slabs_partial, &s->slab_link);
+    }
+}
+
+// ================== kmalloc/kfree ==================
+static char kmalloc_names[KMALLOC_CACHES_NUM][24];
+
+static struct kmem_cache *find_kmalloc_cache(size_t size) {
+    for (int i = 0; i < KMALLOC_CACHES_NUM; i++)
+        if (kmalloc_caches[i] && kmalloc_caches[i]->objsize >= size)
+            return kmalloc_caches[i];
     return NULL;
 }
 
-// SLUB释放
-void slub_free(void *ptr) {
-    if (ptr == NULL) {
+static void init_kmalloc_caches(void) {
+    size_t sz = KMALLOC_MIN_SIZE;
+    for (int i = 0; i < KMALLOC_CACHES_NUM; i++) {
+        snprintf(kmalloc_names[i], sizeof(kmalloc_names[i]), "kmalloc-%u", (unsigned)sz);
+        kmalloc_caches[i] = kmem_cache_create(kmalloc_names[i], sz, 0, NULL, NULL);
+        assert(kmalloc_caches[i] != NULL);
+        if (sz < KMALLOC_MAX_SIZE) sz <<= 1; else break;
+    }
+    kmalloc_caches_inited = 1;
+}
+
+void *kmalloc(size_t size) {
+    if (size == 0) return NULL;
+    if (!kmalloc_caches_inited)
+        init_kmalloc_caches();
+
+    if (size > KMALLOC_MAX_SIZE) {
+        size_t pages = (size + sizeof(struct big_alloc_hdr) + PGSIZE - 1) / PGSIZE;
+        struct Page *page = page_alloc(pages);
+        if (!page) return NULL;
+        struct big_alloc_hdr *hdr = (struct big_alloc_hdr *)page2kva(page);
+        hdr->magic = BIG_HDR_MAGIC;
+        hdr->pages = (uint32_t)pages;
+        return (void *)(hdr + 1);
+    }
+    struct kmem_cache *cache = find_kmalloc_cache(size);
+    if (!cache) return NULL;
+    return kmem_cache_alloc(cache);
+}
+
+void kfree(void *obj) {
+    if (!obj) return;
+    struct Page *page = kva2page(obj);
+    void *base = page2kva(page);
+    struct big_alloc_hdr *bhdr = (struct big_alloc_hdr *)base;
+    if (bhdr->magic == BIG_HDR_MAGIC) {
+        page_free(page, bhdr->pages);
         return;
     }
-    
-    // 检查是否是大对象
-    for (int i = 0; i < nr_large_allocs; i++) {
-        if (large_allocs[i].addr == ptr) {
-            // 释放大对象
-            struct Page *page = pa2page(PADDR((uintptr_t)ptr));
-            free_pages(page, large_allocs[i].pages);
-            
-            // 从记录中删除
-            large_allocs[i] = large_allocs[nr_large_allocs - 1];
-            nr_large_allocs--;
-            return;
-        }
-    }
-    
-    // 查找对象所属的slab
-    kmem_cache_t *cache;
-    slub_slab_t *slab = find_slab(ptr, &cache);
-    
-    if (slab == NULL) {
-        cprintf("Warning: slub_free called with invalid pointer %p\n", ptr);
-        return;
-    }
-    
-    // 检查slab当前状态
-    int was_full = (slab->freelist == NULL);
-    
-    // 将对象加入空闲链表
-    slub_object_t *obj = (slub_object_t *)ptr;
-    obj->next = slab->freelist;
-    slab->freelist = obj;
-    slab->inuse--;
-    cache->nr_free++;
-    
-    // 如果slab从full变为partial
-    if (was_full) {
-        list_del(&slab->slab_link);
-        list_add(&cache->partial_slabs, &slab->slab_link);
-    }
-    
-    // 如果slab完全空闲
-    if (slab->inuse == 0) {
-        list_del(&slab->slab_link);
-        
-        // 如果cache中空闲slab太多(>2个),释放这个slab
-        int free_slab_count = 0;
-        list_entry_t *le = list_next(&cache->free_slabs);
-        while (le != &cache->free_slabs) {
-            free_slab_count++;
-            le = list_next(le);
-        }
-        
-        if (free_slab_count >= 2) {
-            // 释放slab
-            cache->nr_slabs--;
-            cache->nr_objs -= slab->objects;
-            cache->nr_free -= slab->objects;
-            free_page(slab->page);
-        } else {
-            // 保留slab
-            list_add(&cache->free_slabs, &slab->slab_link);
-        }
-    }
+    struct slab *s = (struct slab *)base;
+    assert(s->magic == SLAB_HDR_MAGIC && s->cache);
+    kmem_cache_free(s->cache, obj);
 }
 
-// 获取已分配内存总量
-size_t slub_allocated_memory(void) {
-    size_t total = 0;
-    
-    for (int i = 0; i < SLUB_SIZE_CLASSES; i++) {
-        kmem_cache_t *cache = &kmem_caches[i];
-        total += (cache->nr_objs - cache->nr_free) * cache->size;
-    }
-    
-    // 加上大对象
-    for (int i = 0; i < nr_large_allocs; i++) {
-        total += large_allocs[i].size;
-    }
-    
-    return total;
+// ================== PMM接口 ==================
+static void slub_pmm_init(void) {
+    default_pmm_manager.init();
+    slub_init();  // 不提前建 kmalloc caches
+}
+static void slub_pmm_init_memmap(struct Page *base, size_t n) {
+    default_pmm_manager.init_memmap(base, n);
+}
+static struct Page *slub_pmm_alloc_pages(size_t n) {
+    return default_pmm_manager.alloc_pages(n);
+}
+static void slub_pmm_free_pages(struct Page *base, size_t n) {
+    default_pmm_manager.free_pages(base, n);
+}
+static size_t slub_pmm_nr_free_pages(void) {
+    return default_pmm_manager.nr_free_pages();
 }
 
-// 获取slab总数
-size_t slub_total_slabs(void) {
-    size_t total = 0;
-    for (int i = 0; i < SLUB_SIZE_CLASSES; i++) {
-        total += kmem_caches[i].nr_slabs;
-    }
-    return total;
+// ================== 自检 ==================
+static void slub_check(void) {
+    cprintf("\n===== SLUB allocator self-check =====\n");
+    struct kmem_cache *c32 = kmem_cache_create("test32", 32, 0, NULL, NULL);
+    assert(c32);
+    void *a = kmem_cache_alloc(c32);
+    void *b = kmem_cache_alloc(c32);
+    assert(a && b && a != b);
+    kmem_cache_free(c32, a);
+    kmem_cache_free(c32, b);
+    kmem_cache_destroy(c32);
+    cprintf("kmem_cache basic test passed.\n");
+
+    void *s1 = kmalloc(16);
+    void *s2 = kmalloc(64);
+    void *s3 = kmalloc(16);
+    assert(s1 && s2 && s3);
+    kfree(s1); kfree(s2); kfree(s3);
+    cprintf("kmalloc small test passed.\n");
+
+    size_t big = PGSIZE * 3 + 123;
+    void *lg = kmalloc(big);
+    assert(lg);
+    kfree(lg);
+    cprintf("kmalloc big test passed.\n");
+    cprintf("SLUB allocator check finished successfully!\n");
 }
 
-// SLUB测试函数
-void slub_check(void) {
-    cprintf("\n========== SLUB Allocator Test ==========\n");
-    
-    // 测试1: 小对象分配和释放
-    cprintf("\nTest 1: Small object allocation (8-256 bytes)\n");
-    void *ptrs[20];
-    size_t sizes[] = {8, 16, 32, 64, 128, 256};
-    
-    for (int i = 0; i < 20; i++) {
-        size_t size = sizes[i % 6];
-        ptrs[i] = slub_alloc(size);
-        assert(ptrs[i] != NULL);
-        
-        // 写入数据验证
-        memset(ptrs[i], 0xAA, size);
-        
-        cprintf("  Allocated %d bytes at %p\n", (int)size, ptrs[i]);
-    }
-    
-    cprintf("  Total allocated: %d bytes\n", (int)slub_allocated_memory());
-    cprintf("  Total slabs: %d\n", (int)slub_total_slabs());
-    
-    // 释放一半
-    for (int i = 0; i < 10; i++) {
-        slub_free(ptrs[i]);
-    }
-    cprintf("  After freeing 10 objects: %d bytes allocated\n", 
-            (int)slub_allocated_memory());
-    
-    // 释放另一半
-    for (int i = 10; i < 20; i++) {
-        slub_free(ptrs[i]);
-    }
-    cprintf("  After freeing all: %d bytes allocated\n", 
-            (int)slub_allocated_memory());
-    
-    // 测试2: 大对象分配
-    cprintf("\nTest 2: Large object allocation (>2048 bytes)\n");
-    void *large1 = slub_alloc(4096);
-    void *large2 = slub_alloc(8192);
-    assert(large1 != NULL);
-    assert(large2 != NULL);
-    
-    cprintf("  Allocated 4096 bytes at %p\n", large1);
-    cprintf("  Allocated 8192 bytes at %p\n", large2);
-    
-    memset(large1, 0xBB, 4096);
-    memset(large2, 0xCC, 8192);
-    
-    slub_free(large1);
-    slub_free(large2);
-    cprintf("  Large objects freed successfully\n");
-    
-    // 测试3: 混合分配模式
-    cprintf("\nTest 3: Mixed allocation pattern\n");
-    void *mixed[30];
-    
-    for (int i = 0; i < 30; i++) {
-        size_t size;
-        if (i % 3 == 0) size = 32;
-        else if (i % 3 == 1) size = 128;
-        else size = 512;
-        
-        mixed[i] = slub_alloc(size);
-        assert(mixed[i] != NULL);
-    }
-    
-    cprintf("  Allocated 30 mixed-size objects\n");
-    cprintf("  Total allocated: %d bytes\n", (int)slub_allocated_memory());
-    
-    // 随机释放模式
-    for (int i = 0; i < 30; i += 2) {
-        slub_free(mixed[i]);
-    }
-    cprintf("  After freeing every other object: %d bytes\n", 
-            (int)slub_allocated_memory());
-    
-    for (int i = 1; i < 30; i += 2) {
-        slub_free(mixed[i]);
-    }
-    cprintf("  All freed: %d bytes\n", (int)slub_allocated_memory());
-    
-    // 测试4: 边界情况
-    cprintf("\nTest 4: Edge cases\n");
-    
-    // 测试最小分配
-    void *min_obj = slub_alloc(1);
-    assert(min_obj != NULL);
-    cprintf("  1-byte allocation: %p (using 8-byte class)\n", min_obj);
-    slub_free(min_obj);
-    
-    // 测试NULL释放
-    slub_free(NULL);
-    cprintf("  NULL free handled correctly\n");
-    
-    // 测试重复分配和释放
-    for (int round = 0; round < 3; round++) {
-        void *temp[10];
-        for (int i = 0; i < 10; i++) {
-            temp[i] = slub_alloc(64);
-            assert(temp[i] != NULL);
-        }
-        for (int i = 0; i < 10; i++) {
-            slub_free(temp[i]);
-        }
-        cprintf("  Round %d: allocate and free 10 objects OK\n", round + 1);
-    }
-    
-    // 测试5: 碎片整理验证
-    cprintf("\nTest 5: Fragmentation test\n");
-    void *frag[50];
-    
-    // 分配50个对象
-    for (int i = 0; i < 50; i++) {
-        frag[i] = slub_alloc(64);
-        assert(frag[i] != NULL);
-    }
-    cprintf("  Allocated 50 objects\n");
-    
-    // 释放所有奇数索引的对象(制造碎片)
-    for (int i = 1; i < 50; i += 2) {
-        slub_free(frag[i]);
-    }
-    cprintf("  Freed 25 objects (creating fragmentation)\n");
-    cprintf("  Allocated memory: %d bytes\n", (int)slub_allocated_memory());
-    
-    // 重新分配25个对象(应该复用空闲空间)
-    size_t slabs_before = slub_total_slabs();
-    for (int i = 1; i < 50; i += 2) {
-        frag[i] = slub_alloc(64);
-        assert(frag[i] != NULL);
-    }
-    size_t slabs_after = slub_total_slabs();
-    
-    cprintf("  Re-allocated 25 objects\n");
-    cprintf("  Slabs before: %d, after: %d (should be same)\n", 
-            (int)slabs_before, (int)slabs_after);
-    assert(slabs_before == slabs_after);
-    
-    // 清理
-    for (int i = 0; i < 50; i++) {
-        slub_free(frag[i]);
-    }
-    
-    // 测试6: 统计信息验证
-    cprintf("\nTest 6: Statistics verification\n");
-    cprintf("  Final allocated memory: %d bytes\n", 
-            (int)slub_allocated_memory());
-    cprintf("  Final slab count: %d\n", (int)slub_total_slabs());
-    
-    // 显示每个size class的状态
-    cprintf("\n  Size class statistics:\n");
-    for (int i = 0; i < SLUB_SIZE_CLASSES; i++) {
-        kmem_cache_t *cache = &kmem_caches[i];
-        if (cache->nr_slabs > 0) {
-            cprintf("    %4d bytes: %d slabs, %d objects, %d free\n",
-                   (int)cache->size, cache->nr_slabs, 
-                   cache->nr_objs, cache->nr_free);
-        }
-    }
-    
-    cprintf("\n========== SLUB Test PASSED ==========\n\n");
+static void slub_pmm_check(void) {
+    slub_check();
+    default_pmm_manager.check();
 }
+
+const struct pmm_manager slub_pmm_manager = {
+    .name = "slub_pmm_manager",
+    .init = slub_pmm_init,
+    .init_memmap = slub_pmm_init_memmap,
+    .alloc_pages = slub_pmm_alloc_pages,
+    .free_pages = slub_pmm_free_pages,
+    .nr_free_pages = slub_pmm_nr_free_pages,
+    .check = slub_pmm_check,
+};
