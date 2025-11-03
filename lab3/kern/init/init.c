@@ -13,6 +13,18 @@
 int kern_init(void) __attribute__((noreturn));
 void grade_backtrace(void);
 
+static void test_exceptions(void) {
+    cprintf("[test] 出现非法指令\n");
+    // 强制生成 32-bit 非法指令：0x00000011（RISC-V 中无效）
+    asm volatile(".word 0x00000011"); // 触发 CAUSE_ILLEGAL_INSTRUCTION
+    cprintf("[test] 处理非法指令异常完毕\n");
+
+    cprintf("[test] 出现断点\n");
+    asm volatile("ebreak"); // 触发 CAUSE_BREAKPOINT
+    cprintf("[test] 处理断点异常完毕\n");
+}
+
+
 int kern_init(void) {
     extern char edata[], end[];
     // 先清零 BSS，再读取并保存 DTB 的内存信息，避免被清零覆盖（为了解释变化 正式上传时我觉得应该删去这句话）
@@ -34,6 +46,8 @@ int kern_init(void) {
 
     clock_init();   // init clock interrupt
     intr_enable();  // enable irq interrupt
+
+    test_exceptions(); // 测试异常处理程序
 
     /* do nothing */
     while (1)

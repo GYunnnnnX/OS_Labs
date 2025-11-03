@@ -27,7 +27,7 @@ static void print_ticks() {
 int clock_print_num = 0;
 ......
 
-		case IRQ_S_TIMER:
+        case IRQ_S_TIMER:
             /*(1)设置下次时钟中断- clock_set_next_event()
              *(2)计数器（ticks）加一
              *(3)当计数器加到100的时候，我们会输出一个`100ticks`表示我们触发了100次时钟中断，同时打印次数（num）加一
@@ -50,13 +50,15 @@ int clock_print_num = 0;
 
 至此，练习一的部分就完成了，可以通过运行命令`make qemu`检测正确性。
 
+
+
 ## 拓展练习Challenge1：描述与理解中断流程
 
 ### 描述ucore中处理中断异常的流程
 
 #### 初始化阶段：
 
-```
+```c
 void idt_init(void) {
     extern void __alltraps(void);
     write_csr(sscratch, 0);
@@ -80,10 +82,7 @@ void idt_init(void) {
 - 将当前程序计数器（PC）保存到`sepc`寄存器，这样在中断处理完成后才能准确返回到被中断的指令位置；
 - 将异常原因存入`scause`寄存器，比如系统调用对应的编码是`01000`；
 - 将异常附加信息存入`stval`寄存器，比如在缺页异常中这里存储的是引发异常的地址；
-- 在`sstatus`寄存器中保存当前的特权级状态，包括中断使能状态和之前的运行模式，以U->S为例，具体来说就是：
-  - 将当前的中断使能状态`sstatus.SIE`保存到`sstatus.SPIE`中，并且会将`sstatus.SIE`清零，从而禁用 S 模式下的中断；
-  - 将当前特权级（即 U 模式，值为 0）保存到`sstatus.SPP`中，并将当前特权级切换到 S 模式；
-
+- 在`sstatus`寄存器中保存当前的特权级状态，包括中断使能状态和之前的运行模式；
 - 最后将PC设置为`stvec`寄存器指向的地址，即跳转到`__alltraps`开始执行软件的中断处理程序。
 
 #### 保存上下文：
@@ -146,7 +145,7 @@ void interrupt_handler(struct trapframe *tf) {
 } 
 ```
 
-在`interrupt_handler()`函数中，`intptr_t cause = (tf->cause << 1) >> 1;`这一行代码将`scause`寄存器的值先左移一位再右移一位，相当于清除了最高位的中断标志，只保留低63位的异常原因编码，以便与已定义的宏进行匹配。而`exception_handler()`中不需要这么处理，直接使用`scause`寄存器即可。并根据cause的值通过**switch-case**逻辑选择不同的中断处理。
+在`interrupt_handler()`函数中，`intptr_t cause = (tf->cause << 1) >> 1;`这一行代码将scause寄存器的值先左移一位再右移一位，相当于清除了最高位的中断标志，只保留低63位的异常原因编码，以便与已定义的宏进行匹配。而`exception_handler()`中不需要这么处理，直接使用`scause`寄存器即可。并根据cause的值通过**switch-case**逻辑选择不同的中断处理。
 
 #### 恢复上下文并返回：
 
@@ -169,7 +168,18 @@ __trapret:
 
 ### Q2：`SAVE_ALL`中寄存器保存在栈中的位置是什么确定的？
 
-主要是通过在`trap.h`中定义的**`struct trapframe`和`struct pushregs`这两个结构体**来确定寄存器保存在栈中的位置的。这两个结构体明确规定了每个寄存器在栈帧中的偏移位置，只需要通过`sp`指向的结构体指针，即可完成对各寄存器的访问。除此之外，`SAVE_ALL`和`RESTORE_ALL`宏严格遵循这个内存布局，这些共同决定了访问的安全与准确性。
+`SAVE_ALL` 中各寄存器在栈中的存储位置是由 **C 语言结构体定义** 和 **汇编宏的固定偏移** 共同确定的。
+
+首先，在 `trap.h` 中定义的 `struct trapframe` 和其中的 `struct pushregs` 明确规定了每个寄存器在异常栈帧（trapframe）中的排列顺序与偏移位置。这个结构体定义等价于为内存布局建立了一张“寄存器表”，从第一个寄存器开始依次排列，保证每个字段的地址相对偏移固定、连续。
+
+其次，在 `SAVE_ALL` 宏的汇编实现中，每条 `STORE` 指令都按照相同的顺序、以固定偏移量（`sp + N * REGBYTES`）将寄存器和CSR内容依次写入栈中。这样，汇编保存的寄存器顺序与结构体字段的顺序严格对应，实现了一一匹配。
+
+因此，栈上寄存器保存的位置是：
+
+- **由结构体的字段顺序定义的内存布局决定逻辑顺序**；
+- **由汇编中固定的偏移量具体落实到栈地址上**。
+
+最终效果是：`sp` 指向的内存区域可被 C 语言直接解释为一个 `struct trapframe` 指针，通过结构体字段访问即可准确获取对应寄存器的值，而无需手动计算偏移。
 
 ### Q3：对于任何中断，`__alltraps` 中都需要保存所有寄存器吗？请说明理由。
 
@@ -179,22 +189,24 @@ __trapret:
 - **C函数调用约定**：C函数的调用约定允许编译器自由使用调用者保存寄存器（如t0-t6, a0-a7等），如果在调用C处理函数前不保存这些寄存器，它们的值可能会被C代码破坏，导致用户程序状态损坏。
 - **统一处理流程：**所有中断共享同一入口和出口代码，这样就简化了设计，避免了为不同类型中断编写专用寄存器的保存/恢复逻辑，提高代码可维护性和可靠性。
 
+
+
 ## 拓展练习Challenge2：理解上下文切换机制
 
 ### Q1：在`trapentry.S`中汇编代码 `csrw sscratch, sp`；`csrrw s0, sscratch, x0`实现了什么操作，目的是什么？
 
 - `csrw sscratch, sp`这条指令表示将当前栈指针 `sp` 的值写入控制状态寄存器 `sscratch`，用于保存用户空间的栈指针；
-- `csrrw s0, sscratch, x0`这条指令表示将 `sscratch` 的当前值（也就是上一步保存的用户空间的栈指针）读出到通用寄存器 `s0` 中，并将源操作数 `x0`的值写入 `sscratch`，也就是清零 `sscratch`；
+- `csrrw s0, sscratch, x0`这条指令表示将 `sscratch` 的当前值（也就是上一步保存的用户空间的栈指针）读出到通用寄存器 `s0` 中，并将源操作数 `x0`（一个硬编码为零的寄存器）的值写入 `sscratch`，也就是清零 `sscratch`；
 
 这两条指令位于汇编宏 `SAVE_ALL`中，此时发生的是保存CPU的寄存器到内存（栈上）的操作，结合后面的    `STORE s0, 2*REGBYTES(sp)`这条指令，所以这两条指令的核心操作就是把用户空间的栈指针存储到栈上用于保存信息。
 
 **那么为什么不直接对`sp`进行store操作呢？**
 
-首先，我们需要保存的是用户空间的栈指针，也就是没有进行开辟栈空间操作之前的栈指针，所以必须得提前保存下来这个信息，我们就使用了`csrw sscratch, sp`这条指令将将**用户空间的栈指针**安全地暂存到 `sscratch` 中；那么，**为什么不直接保存`sscratch`寄存器的值到栈上呢？**从指导书中我们得知，这是因为**RISCV不能直接从CSR写到内存, **需要`csrr`把CSR读取到通用寄存器，再从通用寄存器STORE到内存。
+首先，我们需要保存的是用户空间的栈指针，也就是没有进行开辟栈空间操作之前的栈指针，所以必须得提前保存下来这个信息，我们就使用了`csrw sscratch, sp`这条指令将**用户空间的栈指针**安全地暂存到 `sscratch` 中；那么，**为什么不直接保存`sscratch`寄存器的值到栈上呢？**从指导书中我们得知，这是因为**RISCV不能直接从CSR写到内存, **需要`csrr`把CSR读取到通用寄存器，再从通用寄存器STORE到内存。
 
 解决了这个问题之后，我们再来看，**为什么需要清零 `sscratch`呢？**
 
-通过查阅相关资料，我了解到，在 RISC-V 约定中，在用户态，`sscratch` 保存内核栈的地址；在内核态，`sscratch` 的值为 0。在处理Trap时，当 `sscratch` 为非零值时，表示发生 Trap 时 CPU 处于用户模式；当 `sscratch` 为零时，表示处于内核模式。将其清零，标志着 CPU 现在已经正式在内核上下文中运行，如果在内核态执行时再次发生异常（比如缺页中断），CPU 看到 `sscratch` 为 0，就会知道当前已经在内核态，从而使用当前的内核栈 `sp` 进行处理，而不会错误地尝试交换 `sp` 和 `sscratch`（即处理新的Trap）。所以**这是一个关键的安全措施**。
+通过查阅相关资料，我们了解到，在 RISC-V 约定中，在用户态，`sscratch` 保存内核栈的地址；在内核态，`sscratch` 的值为 0。在处理Trap时，当 `sscratch` 为非零值时，表示发生 Trap 时 CPU 处于用户模式；当 `sscratch` 为零时，表示处于内核模式。将其清零，标志着 CPU 现在已经正式在内核上下文中运行，如果在内核态执行时再次发生异常（比如缺页中断），CPU 看到 `sscratch` 为 0，就会知道当前已经在内核态，从而使用当前的内核栈 `sp` 进行处理，而不会错误地尝试交换 `sp` 和 `sscratch`（即处理新的Trap）。所以**这是一个关键的安全措施**。
 
 ### Q2(a)：save all里面保存了`stval` `scause`这些`csr`，而在`restore all`里面却不还原它们？
 
@@ -226,11 +238,104 @@ __trapret:
 
 ### Q2(b)：那这样store的意义何在呢？
 
-上面说到的store这些不需要恢复的`csr`寄存器的意义有些含糊，在这里给出明确回答，我认为这样的意义就是，首先肯定是**用于保护这些寄存器的值**，其次，我认为在此处更重要的意义是：**通过store，使得栈空间与结构体相对应，C语言程序可以直接通过`tf->cause`获得这些`csr`寄存器的值，否则，由于C语言不能指向性地访问寄存器，就拿不到`csr`寄存器的值了，也就无法进行异常处理。**
+上面说到的store这些不需要恢复的`csr`寄存器的意义有些含糊，在这里给出明确回答，我们认为这样的意义就是，**通过store，使得栈空间与结构体相对应，C语言程序可以直接通过`tf->cause`获得这些`csr`寄存器的值，否则，由于C语言不能指向性地访问寄存器，就拿不到`csr`寄存器的值了，也就无法进行异常处理。**
+
+
 
 ## 拓展练习Challenge3：完善异常中断
 
+捕获到异常时，程序会跳转到`trap.c`中的`trap()`函数，经过分发，在 `exception_handler()` 进行对应处理。在异常处理函数内部，接收trapframe作为参数，读取 `tf->cause` 判断异常类型，并用一个 switch 语句对不同异常情况进行不同处理。
 
+在本次练习中，我们将异常处理过程简化为 **“简单输出异常类型和异常指令触发地址” + “更新 epc 寄存器使得返回后跳过出错指令”**
+
+```c
+void exception_handler(struct trapframe *tf) {
+    switch (tf->cause) {
+        case CAUSE_ILLEGAL_INSTRUCTION:
+            // 非法指令异常处理
+            /*(1)输出指令异常类型（ Illegal instruction）
+             *(2)输出异常指令地址
+             *(3)更新 tf->epc寄存器
+            */
+            cprintf("Exception type: Illegal instruction\n");
+            cprintf("Illegal instruction caught at 0x%08x\n", tf->epc);
+            advance_epc(tf);
+            break;
+        case CAUSE_BREAKPOINT:
+            //断点异常处理
+            /*(1)输出指令异常类型（ breakpoint）
+             *(2)输出异常指令地址
+             *(3)更新 tf->epc寄存器
+            */
+            cprintf("Exception type: breakpoint\n");
+            cprintf("ebreak caught at 0x%08x\n", tf->epc);
+            advance_epc(tf);
+            break;
+        // 其它case省略
+        default:
+            print_trapframe(tf);
+            break;
+    }
+}
+```
+
+具体来说，我们实现了`CAUSE_ILLEGAL_INSTRUCTION` 与 `CAUSE_BREAKPOINT` 两种异常类型的中断处理。打印输出部分，根据对应的异常原因，输出异常类型的提示；根据当前 tf->epc 的值，输出异常指令的触发地址；最后更新 epc 寄存器，以跳过当前异常指令继续执行。在最后的部分，有一个小细节在于，RISC-V 指令可能为 16-bit（对部分指令进行了压缩） 或 32-bit，因此需要动态判断指令长度，来更新 epc 进行跳过。实现如下：
+
+```c
+static inline void advance_epc(struct trapframe *tf) {
+    // RISC-V 指令长度由最低两位决定：
+    //  - 00/01/10 => 16-bit
+    //  - 11       => 32-bit
+    uint16_t lo = *(uint16_t *)(uintptr_t)tf->epc;
+    if ((lo & 0x3) != 0x3) {
+        tf->epc += 2;   // 16-bit 指令
+    } else {
+        tf->epc += 4;   // 32-bit 指令
+    }
+}
+```
+
+为了验证这部分逻辑是否正确，我们在 init.c 中编写了一个测试函数 `test_exceptions()`。
+
+```c
+static void test_exceptions(void) {
+    cprintf("[test] 出现非法指令\n");
+    // 强制生成 32-bit 非法指令：0x00000011（RISC-V 中无效）
+    asm volatile(".word 0x00000011"); // 触发 CAUSE_ILLEGAL_INSTRUCTION
+    cprintf("[test] 处理非法指令异常完毕\n");
+
+    cprintf("[test] 出现断点\n");
+    asm volatile("ebreak"); // 触发 CAUSE_BREAKPOINT
+    cprintf("[test] 处理断点异常完毕\n");
+}
+
+int kern_init(void) {
+    // ...
+    idt_init();     // 设置 stvec = __alltraps, sscratch = 0
+    clock_init();   // 允许 STIP，并设定第一个 sbi_set_timer(now+10ms)
+    intr_enable();  // sstatus.SIE=1，全局开中断
+    // ...
+    test_exceptions();  // 测试异常处理
+    // ...
+    while (1) ;
+}
+```
+
+测试函数的设计思路是主动触发两种异常，看内核是否能识别并正确处理。第一个部分使用了内联汇编，通过写入 `.word 0x00000000` 来构造一条无效的 32 位指令，这在 RISC-V 中不对应任何合法操作码，因此会触发非法指令异常。第二部分则通过执行 `ebreak` 指令触发断点异常。每个测试片段前后都打印提示信息，这样在内核输出中可以清晰地看到异常触发与异常恢复的顺序关系。我们将整个异常测试函数放到 init.c 中的 kern_init() 函数中，并放到中断程序使能完毕之后的位置，确保异常中断能正常触发。
+
+```c
+// 测试打印输出结果：
+[test] 出现非法指令
+Exception type: Illegal instruction
+Illegal instruction caught at 0xc02000aa
+[test] 处理非法指令异常完毕
+[test] 出现断点
+Exception type: breakpoint
+ebreak caught at 0xc02000c4
+[test] 处理断点异常完毕
+```
+
+整个测试的执行结果印证了设计的正确性：在非法指令和 ebreak 执行时，内核成功捕获并输出异常类型与触发地址，然后顺利继续运行了测试函数中后续的语句。
 
 
 

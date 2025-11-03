@@ -103,6 +103,18 @@ void print_regs(struct pushregs *gpr) {
     cprintf("  t6       0x%08x\n", gpr->t6);
 }
 
+static inline void advance_epc(struct trapframe *tf) {
+    // RISC-V 指令长度由最低两位决定：
+    //  - 00/01/10 => 16-bit
+    //  - 11       => 32-bit
+    uint16_t lo = *(uint16_t *)(uintptr_t)tf->epc;
+    if ((lo & 0x3) != 0x3) {
+        tf->epc += 2;   // 16-bit 指令
+    } else {
+        tf->epc += 4;   // 32-bit 指令
+    }
+}
+
 void interrupt_handler(struct trapframe *tf) {
     intptr_t cause = (tf->cause << 1) >> 1;
     switch (cause) {
@@ -180,6 +192,9 @@ void exception_handler(struct trapframe *tf) {
              *(2)输出异常指令地址
              *(3)更新 tf->epc寄存器
             */
+            cprintf("Exception type: Illegal instruction\n");
+            cprintf("Illegal instruction caught at 0x%08x\n", tf->epc);
+            advance_epc(tf);
             break;
         case CAUSE_BREAKPOINT:
             //断点异常处理
@@ -188,6 +203,9 @@ void exception_handler(struct trapframe *tf) {
              *(2)输出异常指令地址
              *(3)更新 tf->epc寄存器
             */
+            cprintf("Exception type: breakpoint\n");
+            cprintf("ebreak caught at 0x%08x\n", tf->epc);
+            advance_epc(tf);
             break;
         case CAUSE_MISALIGNED_LOAD:
             break;
