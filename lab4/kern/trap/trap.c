@@ -11,6 +11,7 @@
 #include <vmm.h>
 
 #define TICK_NUM 100
+int clock_print_num = 0;
 
 static void print_ticks()
 {
@@ -111,6 +112,15 @@ void interrupt_handler(struct trapframe *tf)
         // clear_csr(sip, SIP_STIP);
 
         /*LAB3 请补充你在lab3中的代码 */ 
+        clock_set_next_event();
+        if(++ticks % TICK_NUM == 0)
+        {
+            print_ticks();
+            if(++clock_print_num == 10)
+            {
+                sbi_shutdown();
+            }
+        }
         break;
     case IRQ_H_TIMER:
         cprintf("Hypervisor software interrupt\n");
