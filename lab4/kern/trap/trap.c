@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <trap.h>
 #include <vmm.h>
+#include <sbi.h>//补充：用于sbi_shutdown
 
 #define TICK_NUM 100
 int clock_print_num = 0;
