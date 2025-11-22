@@ -161,10 +161,13 @@ get_pid(void)
         while ((le = list_next(le)) != list)
         {
             proc = le2proc(le, list_link);
+            //如果遍历发生了冲突，需要更新last_pid
             if (proc->pid == last_pid)
             {
+                //如果相等，先递增last_pid
                 if (++last_pid >= next_safe)
                 {
+                    //如果当前遍历到最大值，发现都被占用，就需要从1开始新一轮遍历了。
                     if (last_pid >= MAX_PID)
                     {
                         last_pid = 1;
@@ -173,6 +176,7 @@ get_pid(void)
                     goto repeat;
                 }
             }
+            //没冲突的话，考虑确定next_safe的值
             else if (proc->pid > last_pid && next_safe > proc->pid)
             {
                 next_safe = proc->pid;
@@ -316,7 +320,7 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
         goto fork_out;
     }
     ret = -E_NO_MEM;
-    // LAB4:EXERCISE2 YOUR CODE
+    // LAB4:EXERCISE2 2311833
     /*
      * Some Useful MACROs, Functions and DEFINEs, you can use them in below implementation.
      * MACROs or Functions:
@@ -341,13 +345,16 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
     //    5. insert proc_struct into hash_list && proc_list
     //    6. call wakeup_proc to make the new child process RUNNABLE
     //    7. set ret vaule using child proc's pid
-     proc = alloc_proc();
+    // 分配proc_struct
+    proc = alloc_proc();
     if (proc == NULL)
     {
         goto fork_out;
     }
+    // 设置父节点和获取pid号
     proc->parent = current;
     proc->pid = get_pid();
+    // 调用函数setup_kstack()和copy_mm()，并且检查运行结果
     if (setup_kstack(proc) != 0)
     {
         goto bad_fork_cleanup_proc;
@@ -356,10 +363,13 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
     {
         goto bad_fork_cleanup_kstack;
     }
+    // 设置tf & context
     copy_thread(proc, stack, tf);
+    // 插入hash_list和proc_list
     hash_proc(proc);
     list_add(&proc_list, &(proc->list_link));
     nr_process++;
+    // 唤醒进程
     wakeup_proc(proc);
     ret = proc->pid;
 fork_out:

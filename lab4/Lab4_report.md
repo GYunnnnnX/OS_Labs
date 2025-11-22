@@ -4,11 +4,106 @@
 
 ## 练习1：分配并初始化一个进程控制块（需要编码）
 
-#### 请说明`proc_struct`中`struct context context`和`struct trapframe *tf`成员变量含义和在本实验中的作用是啥？（提示通过看代码和编程调试可以判断出来）
+- 请说明`proc_struct`中`struct context context`和`struct trapframe *tf`成员变量含义和在本实验中的作用是啥？（提示通过看代码和编程调试可以判断出来）
 
 ## 练习2：为新创建的内核线程分配资源（需要编码）
 
-#### 请说明`ucore`是否做到给每个新fork的线程一个唯一的id？请说明你的分析和理由。
+### Q1：简要说明设计实现过程。
+
+`do_fork` 函数是 ucore 中创建内核线程的核心函数。它的作用是创建当前内核线程的一个副本，它们的执行上下文、代码、数据都一样，但是存储位置不同。在这个过程中，需要给新内核线程分配资源，并且复制原进程的状态。本实验中，此函数的设计实现过程设计如下：
+
+1. **获得一块用户信息块 (`alloc_proc`)**：
+
+   - 首先检查当前系统进程总数 `nr_process` 是否超过最大限制 `MAX_PROCESS`。
+   - 调用 `alloc_proc()` 分配并初始化一个新的进程控制块（`PCB`）。如果分配失败，返回错误。
+   - 设置父子指针：将新进程的 `parent` 指针指向当前进程 （`current`）。
+
+2. **分配内核栈 (`setup_kstack`)**：
+
+   - 调用 `setup_kstack()` 为新进程分配大小为 `KSTACKPAGE` 个页大小的内存作为内核栈。之后，内核状态下的进程将在内核栈中进行操作。
+   - 调用 `get_pid()` 为新进程分配一个全局唯一的进程标识符。
+
+3. **内存管理信息复制 (`copy_mm`)**：
+
+   - 调用 `copy_mm()`。在本实验中，创建内核线程共享内核的内存空间，因此在当前实验阶段并**不**需要进行内存管理信息的复制；
+
+   ​       在Lab4中，这个函数 "**do nothing**" 。
+
+4. **上下文复制 (`copy_thread`)**：
+
+   - 调用 `copy_thread()`，在新进程内核栈栈顶设置新进程的中断帧（`tf`），同时设置上下文（`context`）信息。
+   - 将`tf->gpr.a0`设为0，这样子进程就知道自己是刚分裂来的。
+   - 设置子进程的用户栈指针（`tf->gpr.sp`），对于内核线程，传入 `esp` == 0，让 `sp` 指向 `proc->tf`。
+   - 将 `context.ra` 设置为 `forkret` 函数的入口地址。当新进程被调度执行时，会跳转到 `forkret`，进而跳转到 `forkrets`，利用中断帧恢复寄存器，最终进入新进程的代码执行流。
+   - 将 `context.sp` 指向刚才设置好的中断帧位置。
+
+5. **将新进程添加到进程列表 (`list_add` & `hash_proc`)**：
+
+   - 调用 `hash_proc()` 将新进程加入 PID 哈希表，以便通过 PID 快速查找。
+   - 将新进程加入全局进程链表 `proc_list`。
+   - 增加进程计数 `nr_process`。
+
+6. **唤醒新进程 (`wakeup_proc`)**：
+
+   - 将新进程的状态设置为 `PROC_RUNNABLE`，使其可以被调度器选中执行。
+
+7. **返回与错误处理**：
+
+   - 如果上述任何步骤失败，跳转到错误处理标签（ `bad_fork_cleanup_kstack` 和 `bad_fork_cleanup_proc`），释放已分配的资源。
+   - 若成功，返回新进程的 PID。
+
+### Q2：请说明`ucore`是否做到给每个新fork的线程一个唯一的id？请说明你的分析和理由。
+
+**答：** 是的，ucore **做到**了给每个新fork的线程一个唯一的id。
+
+**分析和理由：**
+
+这一机制是由 `get_pid` 函数来保证的。根据代码逻辑分析如下：
+
+1. **确保id空间足够**： 首先利用 `static_assert(MAX_PID > MAX_PROCESS);`语句确保PID的取值范围大于系统允许的最大进程数。
+
+2. **搜索与冲突检测 (`get_pid` 逻辑)**：
+
+   - 函数维护了一个静态变量 `last_pid`，记录上一次分配的 PID。
+
+   - 每次分配时，尝试 `++last_pid`。
+
+   - **核心检查逻辑**：如果 `last_pid` 进入了可能发生冲突的区域（即大于 `next_safe`），函数会遍历当前的全局进程链表 `proc_list`：
+
+     ```C
+     while ((le = list_next(le)) != list)
+     {
+         proc = le2proc(le, list_link);
+         //如果遍历发生了冲突，需要更新last_pid
+         if (proc->pid == last_pid)
+         {
+             //如果相等，先递增last_pid
+             if (++last_pid >= next_safe)
+             {
+                 //如果当前遍历到最大值，发现都被占用，就需要从1开始新一轮遍历了。
+                 if (last_pid >= MAX_PID)
+                 {
+                     last_pid = 1;
+                 }
+                 next_safe = MAX_PID;
+                 goto repeat;
+             }
+         }
+         //没冲突的话，考虑确定next_safe的值
+         else if (proc->pid > last_pid && next_safe > proc->pid)
+         {
+             next_safe = proc->pid;
+         }
+     }
+     ```
+
+   - 一旦在链表中发现有进程的 PID 等于当前的 `last_pid`，代码会立即递增 `last_pid` 并跳转到 `repeat` 标签**重新开始**整个链表的遍历检查。直到找到第一个没被占用的 `last_pid`。
+
+   - 在 `last_pid`已经分配好后，将`next_safe`设置在下一个`pid`处，即“大于 `last_pid`的第一个已分配的`pid`”，在此之前的id空间可以放心分配。比如当前被占用的序列是1、2、7，那么 `last_pid`将会被分配为3， `next_safe`设置为7，在此之间的id空间（4、5、6）就可以安全分配了。这样可以有效剪枝一些不必要的扫描，提高效率。
+
+   - 如果某次分配，`last_pid >= next_safe`，就将`next_safe`设置为`MAX_PID`，重新进行上述的扫描过程。
+
+**总结：**通过上面的分析，我们发现代码已经通过了严格的扫描遍历检查机制，严格保证了分配给新线程的 PID 是**唯一**的。
 
 ## 练习3：编写`proc_run` 函数（需要编码）
 
@@ -265,4 +360,3 @@ void intr_disable(void) { clear_csr(sstatus, SSTATUS_SIE); }
 
 - `get_pte()`函数中有两段形式类似的代码， 结合sv32，sv39，sv48的异同，解释这两段代码为什么如此相像。
 - 目前`get_pte()`函数将页表项的查找和页表项的分配合并在一个函数里，你认为这种写法好吗？有没有必要把两个功能拆开？
-
