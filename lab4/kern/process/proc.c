@@ -101,7 +101,7 @@ alloc_proc(void)
         proc->pgdir = boot_pgdir_pa;
         proc->flags = 0;
         memset(proc->name, 0, sizeof(proc->name));
-        // LAB4:EXERCISE1 YOUR CODE
+        // LAB4:EXERCISE1 2310724
         /*
          * below fields in proc_struct need to be initialized
          *       enum proc_state state;                      // Process state
