@@ -4,7 +4,53 @@
 
 ## 练习1：分配并初始化一个进程控制块（需要编码）
 
-- 请说明`proc_struct`中`struct context context`和`struct trapframe *tf`成员变量含义和在本实验中的作用是啥？（提示通过看代码和编程调试可以判断出来）
+### Q1：简要说明alloc_proc函数初始化一个进程控制块的设计实现过程
+
+这个函数的功能是创建一个新的进程控制块，在最初的第0个内核线程 idleproc 初始化（proc_init）的时候，以及创建一个新的子进程（do_fork）时会被调用。它主要做了两件事：
+
+1. 用 `kmalloc` 给进程控制块（`proc_struct`）分配了一块内核的堆内存，用于承载这个进程控制块结构体的字段内容；
+
+	```
+	struct proc_struct *proc = kmalloc(sizeof(struct proc_struct));
+	```
+
+2. 把这个进程控制块的各个字段都初始化到一个干净的、未运行的内核线程状态。
+
+	```cpp
+	proc->state = PROC_UNINIT;  // 设置进程为“初始”态
+	proc->pid = -1;  // 设置进程pid的未初始化值
+	proc->runs = 0;  // 记录这个进程/线程 被调度运行了多少次，初始为 0
+	proc->kstack = 0;  // 进程的内核栈地址，初始为 0，表示还没给它分配内核栈
+	proc->need_resched = 0;  // 表示当前进程不需要主动让出 CPU（不默认为占位进程）
+	proc->parent = NULL;  // 标识父进程，也就是从谁那里fork来的
+	proc->mm = NULL;  // 内核线程不需要自己的 mm（因为是共享内核地址空间），所以为 NULL
+	memset(&(proc->context), 0, sizeof(struct context));  // 把内核上下文context全部清零
+	proc->tf = NULL;  // 对内核新建的 PCB 来说，还没有 trapframe，自然为 NULL
+	proc->pgdir = boot_pgdir_pa;  // 使用内核页目录表的基址
+	proc->flags = 0;  // 各种进程标志位，比如是否正在退出、是否被杀掉等，这里全部清零，表示干净
+	memset(proc->name, 0, sizeof(proc->name));  // 进程名清空，后面通过 set_proc_name 设置
+	```
+
+### Q2：说明`proc_struct`中`struct context context`和`struct trapframe *tf`成员变量含义和在本实验中的作用
+
+**context** 是**线程在内核态运行时所需保存的寄存器集合**，是用于**线程切换**的**CPU 内核态上下文**，包括`ra`（返回地址）、`sp`（内核栈指针），以及`s0~s11`（callee-saved 寄存器）
+
+> 因为线程切换在 `switch_to()` 函数当中，所以编译器会自动帮助我们生成保存和恢复调用者保存寄存器（如 `a0-a7`、`t0-t6`）的代码，因此在实际的进程切换过程中我们只需要保存被调用者（callee-saved）寄存器
+
+每次进行线程切换时，都会调用 `switch_to()` 函数，将之前线程的上下文保存到它的内核栈中，然后把当前新线程的上下文从内核栈加载出来，最终执行 `ret` 回到新线程的上下文中的ra寄存器指向的位置，这样就可以紧接着线程之前的状态开始继续运行，而不会错乱。
+
+> 对于刚被初始化、才第一次执行的进程（例如本次实验中的Initproc）来说，显然它是没有上下文的，因此我们会主动构造它的上下文，将 context.ra 设置为 forkret，用手工构造的 trapframe 初始化线程寄存器和状态、运行线程函数（实际上对用户进程，tf 是 trap/系统调用进入时自动产生的，就无需手动伪造了）
+
+---
+
+**trapframe** 虽然同样能够保存各种寄存器状态，但是它则是用于记录 CPU 在 trap 事件发生时的各种信息，包括所有通用寄存器（a0–a7, t0–t6, s0–s11, ra, sp）、`sepc`（异常返回地址）、`sstatus`（状态寄存器），以及各种中断信息字段，反映的是**线程的整个执行现场**
+
+在本次实验中，它还承担了进程首次执行时的初始化任务，具体来说，内核线程创建时由 copy_thread 构造 tf，进程切换时 forkret 则会从 `proc->tf` 中恢复所有寄存器、执行 `sret`，最后回到 `tf->epc` 指向的位置（启动代码 kernel_thread_entry）继续执行，通过 tf 恢复进入 fn(arg)
+
+> **总结来说：**
+> **context 用于调度 (switch_to)，tf 用于 trap 和线程首次启动 (forkret → forkrets)**
+> **context.sp 让 switch_to 能切到新线程，tf 让该线程真正运行起来。**
+
 
 ## 练习2：为新创建的内核线程分配资源（需要编码）
 
