@@ -17,7 +17,7 @@
 #include <sbi.h>
 
 #define TICK_NUM 100
-int clock_print_num = 0;
+
 static void print_ticks()
 {
     cprintf("%d ticks\n", TICK_NUM);
@@ -116,24 +116,23 @@ void interrupt_handler(struct trapframe *tf)
         cprintf("User software interrupt\n");
         break;
     case IRQ_S_TIMER:
-        // "All bits besides SSIP and USIP in the sip register are
-        // read-only." -- privileged spec1.9.1, 4.1.4, p59
-        // In fact, Call sbi_set_timer will clear STIP, or you can clear it
-        // directly.
-        // cprintf("Supervisor timer interrupt\n");
-         /* LAB3 EXERCISE1   2311833 :  */
-        /*(1)设置下次时钟中断- clock_set_next_event()
-         *(2)计数器（ticks）加一
-         *(3)当计数器加到100的时候，我们会输出一个`100ticks`表示我们触发了100次时钟中断，同时打印次数（num）加一
-         * (4)判断打印次数，当打印次数为10时，调用<sbi.h>中的关机函数关机
-         */
+        /* LAB5 GRADE   2311833 :  */
+        /* 时间片轮转： 
+        *(1) 设置下一次时钟中断（clock_set_next_event）
+        *(2) ticks 计数器自增
+        *(3) 每 TICK_NUM 次中断（如 100 次），进行判断当前是否有进程正在运行，如果有则标记该进程需要被重新调度（current->need_resched）
+        */
+        //设置下一次时钟中断 
         clock_set_next_event();
-        if(++ticks % TICK_NUM == 0)
-        {
-            print_ticks();
-            if(++clock_print_num == 10)
-            {
-                sbi_shutdown();
+
+        //ticks自增
+        ticks++;
+
+        //每 TICK_NUM 次触发一次调度
+        if (ticks % TICK_NUM == 0) {
+            //如果当前有正在运行的进程，则标记其需要重新调度
+            if (current != NULL) {
+                current->need_resched = 1;
             }
         }
         break;
