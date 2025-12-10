@@ -17,7 +17,7 @@
 #include <sbi.h>
 
 #define TICK_NUM 100
-
+int clock_print_num = 0;
 static void print_ticks()
 {
     cprintf("%d ticks\n", TICK_NUM);
