@@ -308,43 +308,54 @@ void trap(struct trapframe *tf)
 }
 
 
-static int cow_handle_fault(uintptr_t badva) {
-    if (current == NULL || current->mm == NULL) return -1;
+static int cow_handle_fault(uintptr_t badva)
+{
+    struct mm_struct *mm = current->mm;
+    if (mm == NULL) return -1;
 
     uintptr_t va = ROUNDDOWN(badva, PGSIZE);
-    pde_t *pgdir = current->mm->pgdir;
 
+    lock_mm(mm);
+
+    pde_t *pgdir = mm->pgdir;
     pte_t *ptep = get_pte(pgdir, va, 0);
-    if (ptep == NULL) return -1;
-    if (!(*ptep & PTE_V)) return -1;
+    if (ptep == NULL || !(*ptep & PTE_V)) {
+        unlock_mm(mm);
+        return -1;
+    }
 
-    uint32_t flags = (*ptep & PTE_PERM_MASK);
+    uint32_t flags = (*ptep) & (PTE_V | PTE_U | PTE_R | PTE_W | PTE_X | PTE_COW);
 
-    // 只处理：COW 且不可写
-    if ((flags & PTE_COW) == 0) return -1;
-    if (flags & PTE_W) return -1;
+    // 只处理 COW + 不可写
+    if ((flags & PTE_COW) == 0 || (flags & PTE_W)) {
+        unlock_mm(mm);
+        return -1;
+    }
 
     struct Page *page = pte2page(*ptep);
-    if (page == NULL) return -1;
+    assert(page != NULL);
 
-    // 新权限：恢复可写，清 COW
     uint32_t new_flags = (flags | PTE_W) & ~PTE_COW;
 
     if (page_ref(page) > 1) {
         struct Page *npage = alloc_page();
-        if (npage == NULL) return -1;
+        if (npage == NULL) {
+            unlock_mm(mm);
+            return -1;
+        }
 
         memcpy(page2kva(npage), page2kva(page), PGSIZE);
 
-        // 用新页覆盖当前进程映射（page_insert 会处理旧页 ref--）
         if (page_insert(pgdir, npage, va, new_flags) != 0) {
             free_page(npage);
+            unlock_mm(mm);
             return -1;
         }
     } else {
-        // 独占页：直接改 PTE
         *ptep = pte_create(page2ppn(page), PTE_V | new_flags);
         tlb_invalidate(pgdir, va);
     }
+
+    unlock_mm(mm);
     return 0;
 }

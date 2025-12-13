@@ -485,6 +485,18 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
     {
         goto bad_fork_cleanup_kstack;
     }
+
+if (current->mm != NULL && proc->mm != NULL) {
+    uintptr_t ustack = USTACKTOP - PGSIZE;
+
+    pte_t *pp = get_pte(current->mm->pgdir, ustack, 0);
+    pte_t *cp = get_pte(proc->mm->pgdir,    ustack, 0);
+
+    cprintf("[COWCHK] parent pid=%d ustack=%p pte=%p val=%016llx\n",
+            current->pid, ustack, pp, pp ? (unsigned long long)*pp : 0);
+    cprintf("[COWCHK] child  pid=%d ustack=%p pte=%p val=%016llx\n",
+            proc->pid, ustack, cp, cp ? (unsigned long long)*cp : 0);
+}
     // 设置tf & context
     copy_thread(proc, stack, tf);
     // 插入hash_list和proc_list
