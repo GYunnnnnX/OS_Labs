@@ -104,7 +104,87 @@ struct trapframe
 
 至此，CPU下一条就开始执行程序的**第一条**指令了。
 
+
+
 ## 练习2：父进程复制自己的内存空间给子进程
+
+> 创建子进程的函数`do_fork`在执行中将拷贝当前进程（即父进程）的用户内存地址空间中的合法内容到新进程中（子进程），完成内存资源的复制。具体是通过`copy_range`函数（位于kern/mm/pmm.c中）实现的，请补充`copy_range`的实现，确保能够正确执行。
+>
+> 请在实验报告中简要说明你的设计实现过程。
+
+创建用户子进程时，会通过系统调用 `sys_fork()` 调用对应内核函数 `do_fork()`，我们的期望是子进程要拥有一份和父进程一样的用户地址空间，而 `do_fork()` 完整流程是：
+
+1. `alloc_proc()`：分配并初始化 PCB（`proc_struct`）
+2. `setup_kstack()`：给子进程分配内核栈（内核态运行必须）
+3. **`copy_mm(clone_flags, proc)`：复制/共享内存管理结构 mm**
+4. `copy_thread(proc, stack, tf)`：准备子进程的 trapframe 和 context
+5. `hash_proc(proc)` + `set_links(proc)`：加入系统进程集合并建立父子关系
+6. `wakeup_proc(proc)`：把子进程设为 runnable
+7. 返回子进程 pid 给父进程
+
+其中`copy_mm()` 在完成 `mm_struct` 和页目录的创建后，会调用 `dup_mmap()` 遍历父进程的所有 `vma`，并在每一个 `vma` 的地址范围内调用 `copy_range()`。
+
+> 在 uCore 中，每个用户进程都有一个 `mm_struct`，用于描述该进程的**完整虚拟地址空间**：
+>
+> - `mm_struct` 中维护了：
+> 	- 页目录（`pgdir`）
+> 	- 一组 `vma_struct`（虚拟内存区域）
+> - 每个 `vma_struct` 描述了一段合法的虚拟地址区间 `[vm_start, vm_end)`，例如代码段、数据段、堆、用户栈等。
+>
+> 在 fork 过程中，复制用户地址空间（也就是整个 `copy_mm` 函数）的本质就是：
+>
+> **为子进程重新构造一套 vma + 页表，并将父进程 vma 覆盖范围内的所有有效虚拟页逐页复制。**
+
+`copy_range()` 是本实验需要补充实现的关键函数，它负责在给定的虚拟地址区间 `[start, end)` 内，逐页复制父进程的用户内存。
+
+其核心实现逻辑如下：
+
+1. **按页遍历虚拟地址区间**
+
+	```
+	start % PGSIZE == 0 && end % PGSIZE == 0
+	```
+
+	保证复制以页为单位进行。
+
+2. **在父进程页表中查找虚拟页映射**
+
+	使用 `get_pte(from, start, 0)` 查找父进程在该虚拟地址处是否存在有效 PTE：
+
+	- 若不存在，说明该页未映射，跳过；
+	- 若存在且有效，则需要复制该页。
+
+3. **为子进程分配新的物理页**
+
+	```
+	struct Page *npage = alloc_page();
+	```
+
+	子进程不能直接使用父进程的物理页，否则会破坏进程间的内存隔离。
+
+4. **复制页内容并建立子进程的页表映射（我们补充实现的具体内容）**
+
+	`src_kvaddr = page2kva(page);`
+
+	- `page` 是父进程某虚拟地址对应的物理页描述符
+	- `page2kva` 把它转换成 **内核可直接访问的虚拟地址**
+
+	`dst_kvaddr = page2kva(npage);`
+
+	- `npage` 是刚分配给子进程的新物理页
+	- 同样转成内核地址，才能写入
+
+	`memcpy(dst_kvaddr, src_kvaddr, PGSIZE);`
+
+	- 复制整页内容（4KB）
+	- 这一步保证子进程拿到一份“与父进程一致”的内存快照
+
+	`page_insert(to, npage, start, perm);`
+
+	- 在子进程页表 `to` 中，把子物理页 `npage` 映射到相同的虚拟地址 `start`
+	- `perm` 是父页的用户权限位（读写执行 U 等），保持一致
+
+
 
 ## 练习3：阅读分析源代码，理解进程执行fork/exec/wait/exit的实现，以及系统调用的实现
 

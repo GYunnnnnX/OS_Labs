@@ -428,11 +428,6 @@ int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end,
             memcpy(dst_kvaddr, src_kvaddr, PGSIZE);
 
             ret = page_insert(to, npage, start, perm);
-            if (ret != 0) {
-                // page_insert 失败要把刚分配的物理页释放掉，避免泄漏
-                free_page(npage);
-                return ret;
-            }
 
             assert(ret == 0);
         }
