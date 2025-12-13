@@ -8,7 +8,7 @@
 
 ### Q1：补充`load_icode`的第6步
 
-**题目要求**：补充`load_icode`的第6步，建立相应的用户内存空间来放置应用程序的代码段、数据段等，且要设置好`proc_struct`结构中的成员变量`trapframe`中的内容，确保在执行此进程后，能够从应用程序设定的起始执行地址开始执行。设置正确的`trapframe`内容。
+> 补充`load_icode`的第6步，建立相应的用户内存空间来放置应用程序的代码段、数据段等，且要设置好`proc_struct`结构中的成员变量`trapframe`中的内容，确保在执行此进程后，能够从应用程序设定的起始执行地址开始执行。设置正确的`trapframe`内容。
 
 **`do_execve`**函数调用`load_icode`函数来**加载**并**解析**一个处于内存中的**ELF**执行文件格式的应用程序。我们要补充的就是`load_icode`函数中的第六步。
 
@@ -166,7 +166,7 @@ struct trapframe
 
 	`src_kvaddr = page2kva(page);`
 
-	- `page` 是父进程某虚拟地址对应的物理页描述符
+	- `page` 是父进程对应的某个物理页
 	- `page2kva` 把它转换成 **内核可直接访问的虚拟地址**
 
 	`dst_kvaddr = page2kva(npage);`
@@ -176,16 +176,334 @@ struct trapframe
 
 	`memcpy(dst_kvaddr, src_kvaddr, PGSIZE);`
 
-	- 复制整页内容（4KB）
+	- **复制整页内容（4KB）**
 	- 这一步保证子进程拿到一份“与父进程一致”的内存快照
 
 	`page_insert(to, npage, start, perm);`
 
 	- 在子进程页表 `to` 中，把子物理页 `npage` 映射到相同的虚拟地址 `start`
-	- `perm` 是父页的用户权限位（读写执行 U 等），保持一致
+	- `perm` 是父页的用户权限位（读写执行 U 等），子进程也与其保持一致
 
 
 
 ## 练习3：阅读分析源代码，理解进程执行fork/exec/wait/exit的实现，以及系统调用的实现
 
+系统调用是用户程序请求操作系统服务的唯一途径，在ucore中，系统调用的完整流程如下：
+
+```
+[用户态]                    [内核态]
+用户程序
+  ↓
+库函数封装 (fork/exec/wait/exit)
+  ↓
+sys_xxx() 函数
+  ↓
+syscall() 准备参数
+  ↓
+ecall 指令 ────────────→  触发异常
+                           ↓
+                        __alltraps (保存上下文)
+                           ↓
+                        trap()
+                           ↓
+                        exception_handler()
+                           ↓
+                        syscall() 分发
+                           ↓
+                        sys_xxx() 内核实现
+                           ↓
+                        do_xxx() 核心处理
+                           ↓
+                        设置返回值到 trapframe
+                           ↓
+                        __trapret (恢复上下文)
+                           ↓
+sret 指令 ←────────────  返回用户态
+  ↓
+用户程序继续执行
+```
+
+由此，我们知道，系统调用的通用逻辑和状态级转换是：
+
+```
+用户态程序 → 用户态库函数 → ecall指令 → 陷入内核 → 内核态处理 → sret返回 → 用户态继续执行
+```
+
+在此基础上，我们详细介绍进程如何执行**fork/exec/wait/exit**操作。
+
+
+
+> 问题：请分析fork/exec/wait/exit的执行流程。重点关注哪些操作是在用户态完成，哪些是在内核态完成？内核态与用户态程序是如何交错执行的？内核态执行结果是如何返回给用户程序的？
+
+首先，在`user/libs/ulib.c` 和 `user/libs/syscall.c`定义了用户程序调用的函数，在此处，**fork/wait/exit**三者的逻辑是一致的，而由于**exec**是**内核态**进行的操作，用户进程没有函数需要调用。首先，在`ulib.c`中，用户可直接调用的函数定义如下：
+
+```c
+void
+exit(int error_code) {
+    sys_exit(error_code);
+    cprintf("BUG: exit failed.\n");
+    while (1);
+} //exit
+
+int
+fork(void) {
+    return sys_fork();
+} //fork 
+
+int
+wait(void) {
+    return sys_wait(0, NULL);
+} //wait
+```
+
+进而，到了`sys_fork/sys_wait/sys_exit`函数，它们在`user/libs/syscall.c`下面。
+
+```c
+int
+sys_exit(int64_t error_code) {
+    return syscall(SYS_exit, error_code);
+} 
+
+int
+sys_fork(void) {
+    return syscall(SYS_fork);
+}
+
+int
+sys_wait(int64_t pid, int *store) {
+    return syscall(SYS_wait, pid, store);
+}
+```
+
+他们都会统一进入到`syscall`函数中，不同的调用会作为参数传进去。
+
+```c
+// syscall函数通过内联汇编执行系统调用
+static inline int 
+syscall(int64_t num, ...) {
+    // 准备参数到寄存器 a0-a5
+    asm volatile (
+        "ld a0, %1\n"      // 系统调用号 -> a0
+        "ld a1, %2\n"      // 参数1 -> a1
+        ...
+        "ecall\n"          // 触发系统调用
+        "sd a0, %0"        // 返回值从a0取出
+        : "=m" (ret)
+        : "m"(num), "m"(a[0]), ...
+    );
+}
+```
+
+到此为止，都是在**用户态**进行的操作。**fork/wait/exit**通过封装的`fork()/wait()/exit()`函数，进而到了`sys_fork()/sys_wait()/sys_exit()`函数，然后统一到了`syscall`这个函数中。在`syscall`中，通过内联汇编，执行系统调用（`ecall`指令），实现从**用户态**到**内核态**的特权级转换。
+
+下面，进行**内核态**的操作：
+
+- `ecall`之后，进入`kern/trap/trapentry.S`的`__alltraps`入口。在这里，先对`trapframe`进行保存，再将当前栈指针（指向 `trapframe`）作为`trap()`的参数，再跳转到`trap()`处理；
+
+- `trap()`（`kern/trap/trap.c`）调用`trap_dispatch()`函数，将这个`ecall`分发给`exception_handler()`处理。
+
+  ```c
+  case CAUSE_USER_ECALL:
+          // cprintf("Environment call from U-mode\n");
+          tf->epc += 4;
+          syscall();//调用syscall()
+          break;
+  ```
+
+- `syscall()`函数如下，它会接受寄存器中的参数并解析：
+
+  ```c
+  void
+  syscall(void) {
+      struct trapframe *tf = current->tf;
+      uint64_t arg[5];
+      int num = tf->gpr.a0;
+      if (num >= 0 && num < NUM_SYSCALLS) {
+          if (syscalls[num] != NULL) {
+              arg[0] = tf->gpr.a1;
+              arg[1] = tf->gpr.a2;
+              arg[2] = tf->gpr.a3;
+              arg[3] = tf->gpr.a4;
+              arg[4] = tf->gpr.a5;
+              tf->gpr.a0 = syscalls[num](arg);
+              return ;
+          }
+      }
+      print_trapframe(tf);
+      panic("undefined syscall %d, pid = %d, name = %s.\n",
+              num, current->pid, current->name);
+  }
+  ```
+
+- 下面就是在**内核**中**分别**对`fork/exec/wait/exit`进行进一步操作了。注意，这里包括了`exec`。我们在本部分之前的分析没有包括`exec`，是因为我们这里的分析都是从用户态调用来的，而`exec`不需要用户调用。
+
+  **那么`exec`是从哪来的呢？**
+
+  我们之前分析过了，`exec`是在内核中调用的，而在内核中我们不能用`ecall`，我们用的是`ebreak`指令，用 `ebreak` 产生断点中断进行处理，通过设置 `a7` 寄存器的值为10 （特殊标识）说明这不是一个普通的断点中断，而是要转发到 `syscall()`。所以，`exec`的执行流在此处与`fork/wait/exit`汇合了，由`syscall()`统一调度，分配到下面的函数中：
+
+  ```c
+  static int
+  sys_exit(uint64_t arg[]) {
+      int error_code = (int)arg[0];
+      return do_exit(error_code);
+  }
+  
+  static int
+  sys_fork(uint64_t arg[]) {
+      struct trapframe *tf = current->tf;
+      uintptr_t stack = tf->gpr.sp;
+      return do_fork(0, stack, tf);
+  }
+  
+  static int
+  sys_wait(uint64_t arg[]) {
+      int pid = (int)arg[0];
+      int *store = (int *)arg[1];
+      return do_wait(pid, store);
+  }
+  
+  static int
+  sys_exec(uint64_t arg[]) {
+      const char *name = (const char *)arg[0];
+      size_t len = (size_t)arg[1];
+      unsigned char *binary = (unsigned char *)arg[2];
+      size_t size = (size_t)arg[3];
+      return do_execve(name, len, binary, size);
+  }
+  ```
+
+  至此，`fork/exec/wait/exit`的操作就都分发至了`do_fork()/do_exec()/do_wait()/do_exit()`函数中了。从`__alltraps`一直到这里，都是在**内核态**中完成的。而**`do_execve`**函数是如何调用`load_icode`函数、再到**返回用户态**执行指令的过程，我们在**练习一**中分析过了，此处不再重复分析了。而`do_exit()`和`do_wait()`到这里就不是我们目前实验的重点了，所以我们以`do_fork()`为例继续向下分析。
+
+- `do_fork()`的主要操作如下：
+
+  ```c
+  int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
+  {   ...
+      proc = alloc_proc();
+      if (proc == NULL)
+      {
+          goto fork_out;
+      }
+      // 设置父节点和获取pid号
+      proc->parent = current;
+      proc->pid = get_pid();
+      // 调用函数setup_kstack()和copy_mm()，并且检查运行结果
+      if (setup_kstack(proc) != 0)
+      {goto bad_fork_cleanup_proc;}
+      if (copy_mm(clone_flags, proc) != 0)
+      {goto bad_fork_cleanup_kstack;}
+      // 设置tf & context
+      copy_thread(proc, stack, tf);
+      // 插入hash_list和proc_list
+      hash_proc(proc);
+      list_add(&proc_list, &(proc->list_link));
+      nr_process++;
+      // 唤醒进程
+      wakeup_proc(proc);
+      ret = proc->pid;
+  fork_out:
+      return ret;
+      ...}
+  ```
+
+  至于`do_fork()`的具体实现，我们在上次的实验中已经详细做过了，此处不再赘述。下面，完成了fork操作的使命，该准备返回**用户态**了。
+
+- 下面的过程，就是一步一步返回了：
+
+  ```c
+  static int
+  sys_fork(uint64_t arg[]) {
+      struct trapframe *tf = current->tf;
+      uintptr_t stack = tf->gpr.sp;
+      return do_fork(0, stack, tf);
+  }
+  ```
+
+  `do_fork()`返回进程号，再到`sys_fork()`进一步返回到`syscall()`，在这里将`PID`写入`tf->gpr.a0`。下面，返回`exception_handler()`，返回`trap_dispatch()`，返回`trap()`，再次返回，就到了内核态开始的地方：`__alltraps`。
+
+  `trap()`的使命完成，它的下一个命令就是`j __trapret`。`__trapret`中，进行`RESTORE_ALL` 恢复所有寄存器，然后执行`sret`，硬件会完成以下操作：PC从`sepc`中读取值、特权级设为`sstatus.SPP`（0，用户态），再把`sstatus.SPP`置0；设置`sstatus.SPIE`等......
+
+  至此，就重新切换回**用户态**了，也意味着**fork/exec/wait/exit**操作都执行完成了。
+
+  
+
+> 问题：请给出ucore中一个用户态进程的执行状态生命周期图（包执行状态，执行状态之间的变换关系，以及产生变换的事件或函数调用）。（字符方式画即可）
+
+进程有下面四种状态：
+
+```
+- PROC_UNINIT   : 未初始化状态
+- PROC_SLEEPING : 睡眠状态（等待事件）
+- PROC_RUNNABLE : 就绪/运行状态
+- PROC_ZOMBIE   : 僵尸状态（已退出，等待回收）
+```
+
+进程图如下：
+
+```
+                     [进程创建]
+                         │
+                    alloc_proc()
+                         │
+                         ↓
+                 ┌───────────────┐
+                 │ PROC_UNINIT   │  (未初始化状态)
+                 │ (刚分配PCB)    │
+                 └───────────────┘
+                         │
+                         │ proc_init() (系统初始化)
+                         │ wakeup_proc() (fork后唤醒)
+                         │
+                         ↓
+    ┌────────────────────────────────────────────────┐
+    │            ┌───────────────┐                   │
+    │            │PROC_RUNNABLE  │ (就绪/运行状态)    │
+    │            │  (可运行)     │                    │
+    │            └───────────────┘                   │
+    │                    │  ↑                        │
+    │      proc_run()    │  │  proc_run()            │
+    │      (调度器选中)   │  │  (切换回来)             │
+    │                    ↓  │                        │
+    │            ┌───────────────┐                   │
+    │            │   RUNNING     │ (运行中-逻辑状态)   │
+    │            │   CPU执行中    │                   │
+    │            └───────────────┘                   │
+    └────────────────────────────────────────────────┘
+                         │
+            ┌────────────┼────────────┬──────────────┐
+            │            │            │              │
+      do_yield()    do_wait()    do_sleep()    do_exit()
+      时间片到期        等待子进程    主动睡眠       进程退出
+            │            │            │              │
+            │            ↓            │              │
+            │    ┌───────────────┐    │              │
+            │    │PROC_SLEEPING  │ ←──┘              │
+            │    │  (睡眠状态)    │                   │
+            │    └───────────────┘                   │
+            │            │                           │
+            │    wakeup_proc()                       │
+            │    (等待事件发生)                       │
+            │            │                           │
+            └────────────┴───────────────────────────┤
+                         │                           │
+                         ↓                           ↓
+                 ┌───────────────┐          ┌───────────────┐
+                 │PROC_RUNNABLE  │          │ PROC_ZOMBIE   │
+                 │  (重新就绪)    │          │ (僵尸状态)    │
+                 └───────────────┘          └───────────────┘
+                                                    │
+                                            父进程 do_wait()
+                                            (回收资源)
+                                                    │
+                                                    ↓
+                                            [进程彻底销毁]
+                                            unhash_proc()
+                                            remove_links()
+                                            put_kstack()
+                                            kfree(proc)
+```
+
+
+
 ## 拓展练习 Challenge
+
