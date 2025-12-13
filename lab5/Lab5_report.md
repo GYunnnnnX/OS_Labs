@@ -166,7 +166,7 @@ struct trapframe
 
 	`src_kvaddr = page2kva(page);`
 
-	- `page` 是父进程某虚拟地址对应的物理页描述符
+	- `page` 是父进程对应的某个物理页
 	- `page2kva` 把它转换成 **内核可直接访问的虚拟地址**
 
 	`dst_kvaddr = page2kva(npage);`
@@ -176,13 +176,13 @@ struct trapframe
 
 	`memcpy(dst_kvaddr, src_kvaddr, PGSIZE);`
 
-	- 复制整页内容（4KB）
+	- **复制整页内容（4KB）**
 	- 这一步保证子进程拿到一份“与父进程一致”的内存快照
 
 	`page_insert(to, npage, start, perm);`
 
 	- 在子进程页表 `to` 中，把子物理页 `npage` 映射到相同的虚拟地址 `start`
-	- `perm` 是父页的用户权限位（读写执行 U 等），保持一致
+	- `perm` 是父页的用户权限位（读写执行 U 等），子进程也与其保持一致
 
 
 
