@@ -106,7 +106,7 @@ alloc_proc(void)
          *       char name[PROC_NAME_LEN + 1];               // Process name
          */
 
-        // LAB5 YOUR CODE : (update LAB4 steps)
+        // LAB5 2310724 : (update LAB4 steps)
         /*
          * below fields(add in LAB5) in proc_struct need to be initialized
          *       uint32_t wait_state;                        // waiting state
@@ -124,6 +124,11 @@ alloc_proc(void)
         proc->pgdir = boot_pgdir_pa;
         proc->flags = 0;
         memset(proc->name, 0, sizeof(proc->name));
+
+        proc->wait_state = 0;
+        proc->cptr = NULL;
+        proc->yptr = NULL;
+        proc->optr = NULL;
     }
     return proc;
 }
@@ -453,7 +458,7 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
     //    6. call wakeup_proc to make the new child process RUNNABLE
     //    7. set ret vaule using child proc's pid
 
-    // LAB5 YOUR CODE : (update LAB4 steps)
+    // LAB5 2310724 : (update LAB4 steps)
     // TIPS: you should modify your written code in lab4(step1 and step5), not add more code.
     /* Some Functions
      *    set_links:  set the relation links of process.  ALSO SEE: remove_links:  lean the relation links of process
@@ -468,6 +473,7 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
         goto fork_out;
     }
     // 设置父节点和获取pid号
+    current->wait_state = 0;
     proc->parent = current;
     proc->pid = get_pid();
     // 调用函数setup_kstack()和copy_mm()，并且检查运行结果
@@ -483,8 +489,7 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
     copy_thread(proc, stack, tf);
     // 插入hash_list和proc_list
     hash_proc(proc);
-    list_add(&proc_list, &(proc->list_link));
-    nr_process++;
+    set_links(proc);
     // 唤醒进程
     wakeup_proc(proc);
     ret = proc->pid;

@@ -216,6 +216,10 @@ void exception_handler(struct trapframe *tf)
         break;
     case CAUSE_LOAD_PAGE_FAULT:
         cprintf("Load page fault\n");
+        // print_trapframe(tf);
+        // if (trap_in_kernel(tf)) {
+        //     panic("kernel load page fault @epc=%p tval=%p\n", tf->epc, tf->tval);
+        // }
         break;
     case CAUSE_STORE_PAGE_FAULT:
         cprintf("Store/AMO page fault\n");
