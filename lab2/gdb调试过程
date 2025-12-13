@@ -1,0 +1,32 @@
+终端1：
+make debug
+终端2：
+pgrep -f qemu-system-riscv64
+sudo gdb
+attach 进程ID
+handle SIGPIPE nostop noprint
+break riscv_cpu_tlb_fill
+break get_physical_address 
+break tlb_set_page
+break /home/lin/workspace/qemu-4.1.1/target/riscv/cpu_helper.c:452
+c
+终端3：
+make gdb
+set remotetimeout unlimited
+break kern_init
+c
+d
+
+- p/x addr
+- p/x *physical
+- p/x ((*physical) + (addr & 0xfff))
+- p/x *prot
+
+- p/x vaddr （页对齐的虚拟地址）
+- p/x paddr （页对齐的物理地址）
+- p/x size （映射页大小）
+- p/x prot （权限位掩码）
+- p mmu_idx （索引；S 模式通常是 1）
+
+QEMU 为不同访问类型维护独立 TLB（取指/读/写），同一页对“写”是一次填充，对“取指/读”可能还会再填一次
+因此即使同一页，首次“取指”的填充不会避免后续“写”的填充。
