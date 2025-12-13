@@ -594,3 +594,76 @@ PTE的PPN=0x80000, 且是叶子节点(ptshift=18)
 
 以上所述就是QEMU进行的完整的地址翻译的过程。
 
+#### 还有一个问题：TLB粒度与页表粒度的不一致性
+
+在调试过程中，我们观察到一个看似矛盾的现象：
+
+1. **页表层面**：通过调试`get_physical_address`函数，我们发现虚拟地址`0xffffffffc0204ff8`的翻译过程中**只在第一级页表（Level 2）就找到了叶子节点**，这说明这是一个**1GB的大页映射**。
+2. **TLB层面**：然而，在`tlb_set_page`函数的调试信息中，我们看到：
+
+```apl
+(gdb) p/x size
+$7 = 0x1000  # 4KB标准页大小
+```
+
+调试信息显示其每次填入的映射关系为**4KB的标准页大小**。
+
+通过询问AI，我又进行了如下调试：
+
+```
+(gdb) break cpu_helper.c:244 if addr == 0xFFFFFFFFC0204FF8
+Breakpoint 1 at 0x5cba7341805c: file /home/lin/workspace/qemu-4.1.1/target/riscv/cpu_helper.c, line 244.
+(gdb) commands
+Type commands for breakpoint(s) 1, one per line.
+End with a line saying just "end".
+>  silent
+>  printf "=== Loop i=%d ===\n", i
+>  printf "PTE Addr: 0x%lx\n", pte_addr
+>  continue
+>end
+
+(gdb) break cpu_helper.c:256 if addr == 0xFFFFFFFFC0204FF8
+Breakpoint 2 at 0x5cba734180d2: file /home/lin/workspace/qemu-4.1.1/target/riscv/cpu_helper.c, line 256.
+(gdb) commands
+Type commands for breakpoint(s) 2, one per line.
+End with a line saying just "end".
+>  silent
+>  printf "PTE Value: 0x%lx\n", pte
+>  printf "Is Valid? %d\n", (pte & 1)
+>  printf "Is Leaf? %d\n", (pte & 14) != 0
+>  continue
+>end
+
+(gdb) break cpu_helper.c:337 if addr == 0xFFFFFFFFC0204FF8
+Breakpoint 3 at 0x5cba73418349: file /home/lin/workspace/qemu-4.1.1/target/riscv/cpu_helper.c, line 337.
+(gdb) commands
+Type commands for breakpoint(s) 3, one per line.
+End with a line saying just "end".
+>  silent
+>  printf ">>> Hit Leaf! Physical: 0x%lx\n", *physical
+>  continue
+>end
+
+(gdb) continue
+Continuing.
+[Switching to Thread 0x737199dfe640 (LWP 257676)]
+=== Loop i=0 ===
+PTE Addr: 0x80205ff8
+PTE Value: 0x200000cf
+Is Valid? 1
+Is Leaf? 1
+>>> Hit Leaf! Physical: 0x80204000
+```
+
+**分析：**
+
+1. **Loop i=0** : 这是第一轮循环，也就是查询 Level 2 页表（根页表）。
+2. **`Is Leaf? 1 : pte & 14`** （即1110）不为 0，说明 R/W/X 权限位被设置了。
+   - 0x200000cf = 0010 0000 0000 0000 0000 0000 1100 1111
+   - 低 8 位 1100 1111 -> D A G U X W R V
+   - R=1, W=1, X=1 (具备读、写、执行权限)，所以这绝对是一个叶子节点。
+3. **结果** : 因为在 Level 2 就发现了叶子节点，所以这就是一个 1GB 的**大页映射 (Gigabyte Page)** 。
+
+这确定了我们在翻译过程中进行的的确是大页映射，说明在建立页表时，是直接在根页表（Level 2）填入了一个指向物理地址 0x80204000 （或者其所属的 1GB 区域基址）的大页条目，所以 QEMU 只跑了一轮循环就找到了物理地址。
+
+然而，在 TLB 填充阶段，`riscv_cpu_tlb_fill` 调用 `tlb_set_page` 时传入的 size 参数始终为 `TARGET_PAGE_SIZE`（即 4KB）。这是因为 QEMU 的软件 TLB 实现为了简化设计，在将大页映射填入 TLB 时，会将其拆分为多个 4KB 粒度的条目进行管理，从而导致了页表粒度与 TLB 粒度在表现形式上的不一致。
