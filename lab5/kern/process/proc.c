@@ -592,7 +592,7 @@ load_icode(unsigned char *binary, size_t size)
         goto bad_pgdir_cleanup_mm;
     }
     //(3) copy TEXT/DATA section, build BSS parts in binary to memory space of process
-    struct Page *page;
+    struct Page *page = NULL;
     //(3.1) get the file header of the bianry program (ELF format)
     struct elfhdr *elf = (struct elfhdr *)binary;
     //(3.2) get the entry of the program section headers of the bianry program (ELF format)
@@ -941,6 +941,10 @@ user_main(void *arg)
     KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE);
 #else
     KERNEL_EXECVE(exit);
+    // KERNEL_EXECVE(cow_basic);
+    // KERNEL_EXECVE(cow_multipages);
+    // KERNEL_EXECVE(cow_stress);
+    panic("user_main execve failed.\n");
 #endif
     panic("user_main execve failed.\n");
 }
