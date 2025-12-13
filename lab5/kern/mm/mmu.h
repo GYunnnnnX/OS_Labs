@@ -79,8 +79,10 @@
 #define PTE_A 0x040    // Accessed
 #define PTE_D 0x080    // Dirty
 #define PTE_SOFT 0x300 // Reserved for Software
+
 #define PTE_COW 0x100   // use PTE_SOFT bit8 as Copy-On-Write mark
-// #define PTE_SOFT 0x200   // Reserved for Software
+#define PTE_PERM_MASK (PTE_R|PTE_W|PTE_X|PTE_U|PTE_G|PTE_A|PTE_D|PTE_SOFT)
+
 
 #define PAGE_TABLE_DIR (PTE_V)
 #define READ_ONLY (PTE_R | PTE_V)
@@ -90,5 +92,9 @@
 #define READ_WRITE_EXEC (PTE_R | PTE_W | PTE_X | PTE_V)
 
 #define PTE_USER (PTE_R | PTE_W | PTE_X | PTE_U | PTE_V)
+#define PTE_URO    (PTE_U | PTE_V | PTE_R)                 // user read-only
+#define PTE_URW    (PTE_U | PTE_V | PTE_R | PTE_W)         // user data/stack (NX)
+#define PTE_URX    (PTE_U | PTE_V | PTE_R | PTE_X)         // user text (RX)
+
 
 #endif /* !__KERN_MM_MMU_H__ */

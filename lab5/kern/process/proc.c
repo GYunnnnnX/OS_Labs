@@ -704,10 +704,10 @@ load_icode(unsigned char *binary, size_t size)
     {
         goto bad_cleanup_mmap;
     }
-    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - PGSIZE, PTE_USER) != NULL);
-    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 2 * PGSIZE, PTE_USER) != NULL);
-    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 3 * PGSIZE, PTE_USER) != NULL);
-    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 4 * PGSIZE, PTE_USER) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - PGSIZE, PTE_URW) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 2 * PGSIZE, PTE_URW) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 3 * PGSIZE, PTE_URW) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 4 * PGSIZE, PTE_URW) != NULL);
 
     //(5) set current process's mm, sr3, and set satp reg = physical addr of Page Directory
     mm_count_inc(mm);
@@ -940,7 +940,22 @@ user_main(void *arg)
 #ifdef TEST
     KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE);
 #else
-    KERNEL_EXECVE(exit);
+    // KERNEL_EXECVE(exit);
+    // KERNEL_EXECVE(badarg);
+    // KERNEL_EXECVE(badsegment);
+    // KERNEL_EXECVE(divezero);
+    // KERNEL_EXECVE(faultread);
+    // KERNEL_EXECVE(faultreadkernel);
+    // KERNEL_EXECVE(forktest);
+    KERNEL_EXECVE(forktree);
+    // KERNEL_EXECVE(hello);
+    // KERNEL_EXECVE(pgdir);
+    // KERNEL_EXECVE(softint);
+    // KERNEL_EXECVE(spin);
+    // KERNEL_EXECVE(testbss);
+    // KERNEL_EXECVE(waitkill);
+    // KERNEL_EXECVE(yield);
+
     // KERNEL_EXECVE(cow_basic);
     // KERNEL_EXECVE(cow_multipages);
     // KERNEL_EXECVE(cow_stress);

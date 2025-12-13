@@ -178,6 +178,8 @@ void exception_handler(struct trapframe *tf)
         break;
     case CAUSE_ILLEGAL_INSTRUCTION:
         cprintf("Illegal instruction\n");
+        cprintf("epc = %p\n", tf->epc);
+        do_exit(-E_KILLED);
         break;
     case CAUSE_BREAKPOINT:
         cprintf("Breakpoint\n");
@@ -218,13 +220,20 @@ void exception_handler(struct trapframe *tf)
         break;
     case CAUSE_FETCH_PAGE_FAULT:
         cprintf("Instruction page fault\n");
+        print_trapframe(tf);
+        if (!trap_in_kernel(tf)) {
+            do_exit(-E_KILLED);
+        } else {
+            panic("kernel instruction page fault @epc=%p tval=%p\n", tf->epc, tf->tval);
+        }
         break;
     case CAUSE_LOAD_PAGE_FAULT:
         cprintf("Load page fault\n");
-        // print_trapframe(tf);
-        // if (trap_in_kernel(tf)) {
-        //     panic("kernel load page fault @epc=%p tval=%p\n", tf->epc, tf->tval);
-        // }
+        print_trapframe(tf);
+        if (trap_in_kernel(tf)) {
+            panic("kernel load page fault @epc=%p tval=%p\n", tf->epc, tf->tval);
+        }
+        do_exit(-E_KILLED);
         break;
     case CAUSE_STORE_PAGE_FAULT:
         // 用户态写 COW 页：在这里完成复制与映射替换
@@ -309,17 +318,17 @@ static int cow_handle_fault(uintptr_t badva) {
     if (ptep == NULL) return -1;
     if (!(*ptep & PTE_V)) return -1;
 
-    // 仅处理：只读 + COW 的页
-    if (((*ptep & PTE_COW) == 0) || (*ptep & PTE_W)) {
-        return -1;
-    }
+    uint32_t flags = (*ptep & PTE_PERM_MASK);
+
+    // 只处理：COW 且不可写
+    if ((flags & PTE_COW) == 0) return -1;
+    if (flags & PTE_W) return -1;
 
     struct Page *page = pte2page(*ptep);
     if (page == NULL) return -1;
 
-    // 继承原权限：去掉 COW，恢复可写
-    uint32_t perm = (*ptep & PTE_USER);
-    perm = (perm | PTE_W) & ~PTE_COW;
+    // 新权限：恢复可写，清 COW
+    uint32_t new_flags = (flags | PTE_W) & ~PTE_COW;
 
     if (page_ref(page) > 1) {
         struct Page *npage = alloc_page();
@@ -327,15 +336,14 @@ static int cow_handle_fault(uintptr_t badva) {
 
         memcpy(page2kva(npage), page2kva(page), PGSIZE);
 
-        // 用新页覆盖当前进程映射为可写
-        // page_insert 内部会：npage ref++；若 va 上已有旧映射，会 page_remove_pte(old) ref--
-        if (page_insert(pgdir, npage, va, perm) != 0) {
+        // 用新页覆盖当前进程映射（page_insert 会处理旧页 ref--）
+        if (page_insert(pgdir, npage, va, new_flags) != 0) {
             free_page(npage);
             return -1;
         }
     } else {
-        // ref==1：无需复制，直接改成可写
-        *ptep = pte_create(page2ppn(page), PTE_V | perm);
+        // 独占页：直接改 PTE
+        *ptep = pte_create(page2ppn(page), PTE_V | new_flags);
         tlb_invalidate(pgdir, va);
     }
     return 0;

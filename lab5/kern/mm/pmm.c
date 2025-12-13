@@ -396,24 +396,24 @@ int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end,
                 return -E_NO_MEM;
             }
             // 不再申请新页（而是只找到父进程的页用于共享）
-            uint32_t perm = (*ptep & PTE_USER);
+            uint32_t flags = (*ptep & PTE_PERM_MASK);
             struct Page *page = pte2page(*ptep);
             assert(page != NULL);
 
             // 仅对原本可写的用户页启用 COW
-            if (perm & PTE_W) {
-                perm = (perm & ~PTE_W) | PTE_COW;
+            if (flags & PTE_W) {
+                uint32_t cow_flags = (flags & ~PTE_W) | PTE_COW;
 
                 // 子进程映射共享页（ref++ in page_insert）
-                int ret = page_insert(to, page, start, perm);
+                int ret = page_insert(to, page, start, cow_flags & ~PTE_V);
                 if (ret != 0) return ret;
 
                 // 父进程也改成只读+COW（只改 PTE，不改 ref）
-                *ptep = pte_create(page2ppn(page), PTE_V | perm);
+                *ptep = pte_create(page2ppn(page), PTE_V | cow_flags);
                 tlb_invalidate(from, start);
             } else {
                 // 不可写页：直接共享即可（可不加 COW）
-                int ret = page_insert(to, page, start, perm);
+                int ret = page_insert(to, page, start, flags & ~PTE_V);
                 if (ret != 0) return ret;
             }
         }
