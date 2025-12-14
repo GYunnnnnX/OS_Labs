@@ -183,10 +183,9 @@
 #define PTE_G 0x020    // Global
 #define PTE_A 0x040    // Accessed
 #define PTE_D 0x080    // Dirty
-#define PTE_SOFT 0x300 // Reserved for Software
+#define PTE_SOFT 0x200 // Reserved for Software
 
 #define PTE_COW 0x100   // use PTE_SOFT bit8 as Copy-On-Write mark
-#define PTE_PERM_MASK (PTE_R|PTE_W|PTE_X|PTE_U|PTE_G|PTE_A|PTE_D|PTE_SOFT)
 
 #define PTE_PPN_SHIFT 10
 

@@ -247,6 +247,10 @@ void proc_run(struct proc_struct *proc)
         struct proc_struct *prev = current;
         current = proc;
         lsatp(proc->pgdir);
+
+        // 关键：地址空间切换后全量刷 TLB（ASID 未正确使用时必需）
+        flush_tlb();
+
         switch_to(&(prev->context), &(proc->context));
         local_intr_restore(intr_flag);
     }
@@ -486,17 +490,18 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
         goto bad_fork_cleanup_kstack;
     }
 
-if (current->mm != NULL && proc->mm != NULL) {
-    uintptr_t ustack = USTACKTOP - PGSIZE;
+    // if (current->mm != NULL && proc->mm != NULL) {
+    //     uintptr_t ustack = USTACKTOP - PGSIZE;
 
-    pte_t *pp = get_pte(current->mm->pgdir, ustack, 0);
-    pte_t *cp = get_pte(proc->mm->pgdir,    ustack, 0);
+    //     pte_t *pp = get_pte(current->mm->pgdir, ustack, 0);
+    //     pte_t *cp = get_pte(proc->mm->pgdir,    ustack, 0);
 
-    cprintf("[COWCHK] parent pid=%d ustack=%p pte=%p val=%016llx\n",
-            current->pid, ustack, pp, pp ? (unsigned long long)*pp : 0);
-    cprintf("[COWCHK] child  pid=%d ustack=%p pte=%p val=%016llx\n",
-            proc->pid, ustack, cp, cp ? (unsigned long long)*cp : 0);
-}
+    //     cprintf("[COWCHK] parent pid=%d ustack=%p pte=%p val=%016llx\n",
+    //             current->pid, ustack, pp, pp ? (unsigned long long)*pp : 0);
+    //     cprintf("[COWCHK] child  pid=%d ustack=%p pte=%p val=%016llx\n",
+    //             proc->pid, ustack, cp, cp ? (unsigned long long)*cp : 0);
+    // }
+
     // 设置tf & context
     copy_thread(proc, stack, tf);
     // 插入hash_list和proc_list
@@ -716,10 +721,10 @@ load_icode(unsigned char *binary, size_t size)
     {
         goto bad_cleanup_mmap;
     }
-    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - PGSIZE, PTE_URW) != NULL);
-    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 2 * PGSIZE, PTE_URW) != NULL);
-    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 3 * PGSIZE, PTE_URW) != NULL);
-    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 4 * PGSIZE, PTE_URW) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - PGSIZE, PTE_USER) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 2 * PGSIZE, PTE_USER) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 3 * PGSIZE, PTE_USER) != NULL);
+    assert(pgdir_alloc_page(mm->pgdir, USTACKTOP - 4 * PGSIZE, PTE_USER) != NULL);
 
     //(5) set current process's mm, sr3, and set satp reg = physical addr of Page Directory
     mm_count_inc(mm);
@@ -959,7 +964,7 @@ user_main(void *arg)
     // KERNEL_EXECVE(faultread);
     // KERNEL_EXECVE(faultreadkernel);
     // KERNEL_EXECVE(forktest);
-    KERNEL_EXECVE(forktree);
+    // KERNEL_EXECVE(forktree);
     // KERNEL_EXECVE(hello);
     // KERNEL_EXECVE(pgdir);
     // KERNEL_EXECVE(softint);
@@ -968,9 +973,7 @@ user_main(void *arg)
     // KERNEL_EXECVE(waitkill);
     // KERNEL_EXECVE(yield);
 
-    // KERNEL_EXECVE(cow_basic);
-    // KERNEL_EXECVE(cow_multipages);
-    // KERNEL_EXECVE(cow_stress);
+    KERNEL_EXECVE(cow_test);
     panic("user_main execve failed.\n");
 #endif
     panic("user_main execve failed.\n");

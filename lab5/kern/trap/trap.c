@@ -308,54 +308,44 @@ void trap(struct trapframe *tf)
 }
 
 
-static int cow_handle_fault(uintptr_t badva)
-{
-    struct mm_struct *mm = current->mm;
-    if (mm == NULL) return -1;
+static int cow_handle_fault(uintptr_t badva) {
+    if (current == NULL || current->mm == NULL) return -1;
 
     uintptr_t va = ROUNDDOWN(badva, PGSIZE);
+    pde_t *pgdir = current->mm->pgdir;
 
-    lock_mm(mm);
-
-    pde_t *pgdir = mm->pgdir;
     pte_t *ptep = get_pte(pgdir, va, 0);
-    if (ptep == NULL || !(*ptep & PTE_V)) {
-        unlock_mm(mm);
-        return -1;
-    }
+    if (ptep == NULL) return -1;
+    if (!(*ptep & PTE_V)) return -1;
 
-    uint32_t flags = (*ptep) & (PTE_V | PTE_U | PTE_R | PTE_W | PTE_X | PTE_COW);
-
-    // 只处理 COW + 不可写
-    if ((flags & PTE_COW) == 0 || (flags & PTE_W)) {
-        unlock_mm(mm);
+    // 仅处理：只读 + COW 的页
+    if (((*ptep & PTE_COW) == 0) || (*ptep & PTE_W)) {
         return -1;
     }
 
     struct Page *page = pte2page(*ptep);
-    assert(page != NULL);
+    if (page == NULL) return -1;
 
-    uint32_t new_flags = (flags | PTE_W) & ~PTE_COW;
+    // 继承原权限：去掉 COW，恢复可写
+    uint32_t perm = (*ptep & PTE_USER);
+    perm = (perm | PTE_W) & ~PTE_COW;
 
     if (page_ref(page) > 1) {
         struct Page *npage = alloc_page();
-        if (npage == NULL) {
-            unlock_mm(mm);
-            return -1;
-        }
+        if (npage == NULL) return -1;
 
         memcpy(page2kva(npage), page2kva(page), PGSIZE);
 
-        if (page_insert(pgdir, npage, va, new_flags) != 0) {
+        // 用新页覆盖当前进程映射为可写
+        // page_insert 内部会：npage ref++；若 va 上已有旧映射，会 page_remove_pte(old) ref--
+        if (page_insert(pgdir, npage, va, perm) != 0) {
             free_page(npage);
-            unlock_mm(mm);
             return -1;
         }
     } else {
-        *ptep = pte_create(page2ppn(page), PTE_V | new_flags);
+        // ref==1：无需复制，直接改成可写
+        *ptep = pte_create(page2ppn(page), PTE_V | perm);
         tlb_invalidate(pgdir, va);
     }
-
-    unlock_mm(mm);
     return 0;
 }
