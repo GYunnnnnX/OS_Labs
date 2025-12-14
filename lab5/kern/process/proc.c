@@ -957,24 +957,10 @@ user_main(void *arg)
 #ifdef TEST
     KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE);
 #else
-    // KERNEL_EXECVE(exit);
-    // KERNEL_EXECVE(badarg);
-    // KERNEL_EXECVE(badsegment);
-    // KERNEL_EXECVE(divezero);
-    // KERNEL_EXECVE(faultread);
-    // KERNEL_EXECVE(faultreadkernel);
-    // KERNEL_EXECVE(forktest);
-    // KERNEL_EXECVE(forktree);
-    // KERNEL_EXECVE(hello);
-    // KERNEL_EXECVE(pgdir);
-    // KERNEL_EXECVE(softint);
-    // KERNEL_EXECVE(spin);
-    // KERNEL_EXECVE(testbss);
-    // KERNEL_EXECVE(waitkill);
-    // KERNEL_EXECVE(yield);
+    KERNEL_EXECVE(exit);
 
     // KERNEL_EXECVE(cow_test);
-    KERNEL_EXECVE(dirtycow_test);
+    // KERNEL_EXECVE(dirtycow_test);
     panic("user_main execve failed.\n");
 #endif
     panic("user_main execve failed.\n");
