@@ -507,3 +507,126 @@ syscall(int64_t num, ...) {
 
 ## 拓展练习 Challenge
 
+### Q2：说明该用户程序是何时被预先加载到内存中的？与我们常用操作系统的加载有何区别，原因是什么？
+
+答：用户程序在编译链接阶段就被嵌入到内核镜像中。该用户程序从`user/exit.c` 到 `obj/__user_exit.out`。再链接到内核：
+
+```c
+$(kernel): $(KOBJS) $(USER_BINS)
+	@echo + ld $@
+	$(V)$(LD) $(LDFLAGS) -T tools/kernel.ld -o $@ $(KOBJS) --format=binary $(USER_BINS) --format=default
+```
+
+由链接器自动生成符号：
+
+```c
+_binary_obj___user_exit_out_start  (程序起始地址)
+_binary_obj___user_exit_out_size   (程序大小)
+```
+
+在**内核启动**时，用户程序随内核一起加载到内存中。等到调用的时候，通过链接器生成的符号调用。
+
+而我们常用的操作系统的用户程序是存储在磁盘文件中的，在加载的时候从**磁盘**读取。
+
+所以，二者加载的**区别**就在于，本用户程序在**系统启动**的时候就加载到了内核的内存中，而一般操作系统加载是**在需要时**，从**磁盘**中读取再加载的。
+
+原因在于：
+
+- 教学目的：ucore作为教学用的操作系统，目标是让学生理解进程管理的核心机制，没必要引入文件系统、磁盘驱动等复杂系统，
+
+​       只需要让实验专注于进程创建、调度、内存管理等核心概念。**简化了系统的实现，专注于核心机制，同时调试、测试方便**。
+
+- 实用目的：正常的实际使用的操作系统肯定不能将所有用户程序都随系统启动加载到内存中（过于巨大、不切实际），必然是将用户程序存储在磁盘上，按需读取。为了实用性和效率，需要实现文件系统、动态加载程序等等。
+
+### 附：第一个用户程序是怎么具体执行的（make qemu后发生了什么）
+
+我们在`proc_init()`函数里初始化进程的时候, 认为启动时运行的ucore程序, 是一个内核进程("第0个"内核进程), 并将其初始化为 `idleproc` 进程。然后我们新建了一个内核进程，即通过`int pid = kernel_thread(init_main, NULL, 0)`语句执行 `init_main()` 函数。
+
+在`kernel_thread()`函数中，我们设置新进程的`trapframe`，然后调用`do_fork`来创建这个进程，并将其设置为`runnable`状态。最后返回到`proc_init()`中，将这个进程命名为：`init`。
+
+`init`进程执行的函数是：`init_main()`，在这个函数中，又通过`int pid = kernel_thread(user_main, NULL, 0)`语句，来创建一个新的内核进程（流程与上面一样），这个新的内核进程执行的函数是：`user_main()`。`init_main()`再通过`do_wait(0, NULL)`语句等待子进程退出，也就是等待 `user_main()` 退出。
+
+函数`user_main()`做了如下操作：
+
+```c
+// user_main - kernel thread used to exec a user program
+static int
+user_main(void *arg) {
+#ifdef TEST
+    KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE); //make grade后，定义测试，才走这条分支
+#else
+    KERNEL_EXECVE(exit); //直接make qemu 走的是这条分支
+#endif
+    panic("user_main execve failed.\n");
+}
+```
+
+主要执行了`KERNEL_EXECVE(exit)`。由注释里所说，走的是本条分支。
+
+```c
+// kern/process/proc.c
+#define __KERNEL_EXECVE(name, binary, size) ({                          \
+            cprintf("kernel_execve: pid = %d, name = \"%s\".\n",        \
+                    current->pid, name);                                \
+            kernel_execve(name, binary, (size_t)(size));                \
+        })
+
+#define KERNEL_EXECVE(x) ({                                             \
+            extern unsigned char _binary_obj___user_##x##_out_start[],  \
+                _binary_obj___user_##x##_out_size[];                    \
+            __KERNEL_EXECVE(#x, _binary_obj___user_##x##_out_start,     \
+                            _binary_obj___user_##x##_out_size);         \
+        })
+
+#define __KERNEL_EXECVE2(x, xstart, xsize) ({                           \
+            extern unsigned char xstart[], xsize[];                     \
+            __KERNEL_EXECVE(#x, xstart, (size_t)xsize);                 \
+        })
+
+#define KERNEL_EXECVE2(x, xstart, xsize)        __KERNEL_EXECVE2(x, xstart, xsize)
+```
+
+本实验修改了`makefile`，把用户程序编译到我们的镜像里。`_binary_obj___user_##x##_out_start` 和 `_binary_obj___user_##x##_out_size` 都是编译的时候自动生成的符号。注意这里的 `##x##`，按照 C 语言宏的语法，会直接把 `x` 的变量名代替进去。
+
+于是，我们在 `user_main()` 所做的，就是执行了
+
+```c
+kern_execve("exit", _binary_obj___user_exit_out_start,_binary_obj___user_exit_out_size)
+```
+
+这么一个函数。它的含义就是，**执行名为“exit”的用户进程**。具体来说，这个函数加载了存储在这个位置的程序 `exit` 并在 `user_main` 这个进程里开始执行。这时 `user_main` 就**从内核进程变成了用户进程**。
+
+**总之**，名为“**exit**”的**用户进程**，就是通过这样的途径，从内核态内核进程的初始化一直到**用户态用户进程**的具体执行的。
+
+
+
+## 重要知识点及其与OS原理的对应关系：
+
+### 用户进程的创建与加载
+
+本实验中，用户进程的部分主要集中了`load_icode()`函数的实现，特别是`trapframe`的设置，涉及了`ELF`文件格式的解析和加载
+
+用户栈的建立等等。在此基础上，我们**详细分析**了本实验中是如何创建用户进程、从内核态到用户态执行第一个用户进程的流程。
+
+对应了OS原理中，程序的加载、进程地址空间的创建和`PCB`的初始化。
+
+这里的用户程序加载与OS原理中常用操作系统的加载是有**区别**的：本用户程序在**系统启动**的时候就加载到了内核的内存中，而一般操作系统加载是**在需要时**，从**磁盘**中读取再加载的。为了教学目的，本实验简化了这部分的逻辑。
+
+### 特权级切换机制
+
+实验中`trapframe`结构的设计（`tf->status`, `tf->epc`, `tf->gpr.sp`）、`SSTATUS_SPP`和`SSTATUS_SPIE`位的设置、`ecall`/`sret`指令的使用和内核态使用`ebreak`触发特殊处理，都是实现特权级转换的关键。它们代表了OS原理中的用户态和内核态切换、中断处理、系统调用的实现等等知识点。
+
+### 系统调用机制
+
+在本实验的练习三部分，详细分析了系统调用机制，包括用户态库函数封装（`fork()` → `sys_fork()` → `syscall()`）、通过寄存器传递参数（a0-a5）、中断处理和特权级转换等等知识点。
+
+### 写时复制（Copy-on-Write）
+
+我们在本实验中还实现了**Copy-on-Write**机制，fork时不立即复制内存，仅在写入时才复制。它对应现代OS中fork的性能优化关键技术。
+
+### 其他
+
+还有一些比较关键的知识点，如上下文切换机制、fork的实现、进程的状态切换等，主要是之前实验的内容。
+
+此外，我们现在还没实现**进程调度算法**（将在下一次实验中实现）。
+
