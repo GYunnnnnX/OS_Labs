@@ -21,6 +21,9 @@
 #define SYS_putc            30
 #define SYS_pgdir           31
 
+#define SYS_dirtycow_buggy   41
+#define SYS_dirtycow_fixed   42
+
 /* SYS_fork flags */
 #define CLONE_VM            0x00000100  // set if VM shared between processes
 #define CLONE_THREAD        0x00000200  // thread group

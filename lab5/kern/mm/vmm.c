@@ -34,6 +34,49 @@
      void check_pgfault(void);
 */
 
+int cow_break_page(struct mm_struct *mm, uintptr_t badva) {
+    if (current == NULL || current->mm == NULL) return -1;
+
+    uintptr_t va = ROUNDDOWN(badva, PGSIZE);
+    pde_t *pgdir = current->mm->pgdir;
+
+    pte_t *ptep = get_pte(pgdir, va, 0);
+    if (ptep == NULL) return -1;
+    if (!(*ptep & PTE_V)) return -1;
+
+    // 仅处理 COW 页
+    if ((*ptep & PTE_COW) == 0) return -1;
+    if (*ptep & PTE_W) return -1; // 确认一下 COW 页不可写
+
+    // 获取对应物理页
+    struct Page *page = pte2page(*ptep);
+    if (page == NULL) return -1;
+
+    // 构造“写后”的权限（去 COW + 恢复写）
+    uint32_t perm = (*ptep & PTE_USER);
+    perm = (perm | PTE_W) & ~PTE_COW;
+
+    // ref > 1：说明当前物理页真的被共享了，则复制一份新的物理页
+    if (page_ref(page) > 1) {
+        struct Page *npage = alloc_page();
+        if (npage == NULL) return -1;
+
+        memcpy(page2kva(npage), page2kva(page), PGSIZE);
+
+        // 用新页覆盖当前进程映射为可写
+        if (page_insert(pgdir, npage, va, perm) != 0) {
+            free_page(npage);
+            return -1;
+        }
+    } else {
+        // ref==1：说明当前页只被本进程使用，直接修改 PTE 即可
+        *ptep = (*ptep & ~PTE_COW) | PTE_W;
+        tlb_invalidate(pgdir, va);
+    }
+    return 0;
+}
+
+
 static void check_vmm(void);
 static void check_vma_struct(void);
 

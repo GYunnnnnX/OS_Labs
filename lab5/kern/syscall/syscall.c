@@ -6,6 +6,21 @@
 #include <pmm.h>
 #include <assert.h>
 
+extern int dirtycow_write_byte_buggy(struct mm_struct *mm, uintptr_t uva, uint8_t val);
+extern int dirtycow_write_byte_fixed(struct mm_struct *mm, uintptr_t uva, uint8_t val);
+
+static int sys_dirtycow_buggy(uint64_t arg[]) {
+    uintptr_t uva = (uintptr_t)arg[0];
+    uint8_t val = (uint8_t)(arg[1] & 0xFF);
+    return dirtycow_write_byte_buggy(current->mm, uva, val);
+}
+
+static int sys_dirtycow_fixed(uint64_t arg[]) {
+    uintptr_t uva = (uintptr_t)arg[0];
+    uint8_t val = (uint8_t)(arg[1] & 0xFF);
+    return dirtycow_write_byte_fixed(current->mm, uva, val);
+}
+
 static int
 sys_exit(uint64_t arg[]) {
     int error_code = (int)arg[0];
@@ -74,6 +89,9 @@ static int (*syscalls[])(uint64_t arg[]) = {
     [SYS_getpid]            sys_getpid,
     [SYS_putc]              sys_putc,
     [SYS_pgdir]             sys_pgdir,
+
+    [SYS_dirtycow_buggy]    sys_dirtycow_buggy,
+    [SYS_dirtycow_fixed]    sys_dirtycow_fixed,
 };
 
 #define NUM_SYSCALLS        ((sizeof(syscalls)) / (sizeof(syscalls[0])))

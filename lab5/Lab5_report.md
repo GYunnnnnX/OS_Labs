@@ -878,6 +878,125 @@ int main(void) {
 
 
 
+### Linix Dirty COW 问题复现与解决
+
+#### 1. Dirty COW 的本质问题
+
+Copy-On-Write 的基本原则是：**在写之前，必须先拿到“只属于自己”的物理页。**
+
+而 Dirty COW 这种攻击方式的原理就是：**用某种方法，使得内核在“准备一次写操作”时，把“写访问”当成“读访问”来进行**，使得后续写入发生在仍被多个进程共享的物理页上，来影响父进程的内存内容
+
+#### 2. 我们是如何“接入”并复现 Dirty COW 的
+
+> 我们没有复刻 Linux 的 madvise 竞态触发，而是通过可控 syscall 强制引入 “写语义丢失” 的错误路径，以稳定复现 Dirty COW 的核心破坏点：绕过 COW 拆分直接写共享页。
+
+##### 2.1 引入一个现实存在的攻击入口
+
+真实 Dirty COW 并不是通过普通用户写触发的，而是利用：
+
+- `/proc/self/mem`
+- `ptrace`
+- 等“**内核态写用户内存**”路径
+
+为此，我们在 uCore 中新增了一个 syscall：
+
+```
+SYS_dirtycow_buggy(addr, val)
+```
+
+它的作用是：
+
+> **让内核直接写用户地址空间中的一个字节**
+
+这条路径**不会触发用户态 page fault**，因此天然绕过了 COW 的正常拆页流程。
+
+##### 2.2 关键错误：写语义被错误丢弃
+
+在 `follow_user_page_buggy()` 中，我们模拟 Dirty COW 的核心错误：
+
+```
+if (write && !PTE_W && PTE_COW) {
+    write = 0;      // 错误：写语义被降级
+    goto retry;
+}
+```
+
+这段代码的实际含义是：
+
+> “本来我要写，但遇到 COW 页后，我假装自己只是来读的。”
+
+结果是：内核成功拿到一个物理页，但该页仍然是父子共享的，然后写入直接发生在共享物理页上
+
+##### 2.3 写穿发生的位置
+
+```
+((uint8_t *)page2kva(page))[off] = val;
+```
+
+这是在内核态通过 page 的内核映射直接写物理内存：
+
+- 不触发 page fault
+- 不走 COW 拆页
+- 父进程与子进程同时受到影响
+
+#### 3. 修补思路与实现
+
+##### 3.1 修补原则
+
+> *让*写访问必须始终保持写语义，直到真正获得可写页为止。**
+
+##### 3.2 修补后的关键逻辑
+
+```
+if (write && !PTE_W && PTE_COW) {
+    cow_break_page(mm, va);   // 强制拆分
+    continue;                // 仍然以“写”重试
+}
+```
+
+区别在于：
+
+- 不再丢弃写语义
+- 每次遇到 COW 页都强制执行拆页
+- 拆页完成后再返回物理页
+
+#### 4. 实验验证
+
+原本父子进程都初始化为` g = 'A'`，子进程写 `g = 'X'`，观察父进程 g 的值，如果没被影响说明正确，被影响了说明发生了 Dirtycow
+
+```c
+int main(void) {
+    *g = 'A';
+    cprintf("[parent] g=%p init=%c\n", g, *g);
+
+    int pid = fork();
+    if (pid == 0) {
+        cprintf("[child ] before=%c\n", *g);
+
+        sys_dirtycow_buggy((uintptr_t)g, 'X');
+        // sys_dirtycow_fixed((uintptr_t)g, 'X');
+
+        cprintf("[child ] after =%c\n", *g);
+        exit(0);
+    }
+    wait();
+    cprintf("[parent] after wait=%c\n", *g);
+    return 0;
+}
+```
+
+- **buggy 路径**：父进程看到被修改的数据（写穿，父进程也变成了X）
+
+	![image-20251214191241573](./img/image-20251214191241573.png)
+
+- **fixed 路径**：父进程数据保持不变（COW 正确，父进程保持）
+
+	![image-20251214191319252](./img/image-20251214191319252.png)
+
+
+
+
+
 ## 拓展练习 Challenge2
 
 > **说明该用户程序是何时被预先加载到内存中的？与我们常用操作系统的加载有何区别，原因是什么？**
