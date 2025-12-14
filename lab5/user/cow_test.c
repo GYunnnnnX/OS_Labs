@@ -27,6 +27,6 @@ int main(void) {
     assert(strcmp(buf, "parent") == 0);
     assert(g == 123);
 
-    cprintf("cow_basic pass.\n");
+    cprintf("cow_test pass.\n");
     return 0;
 }
