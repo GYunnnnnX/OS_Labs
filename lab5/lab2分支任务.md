@@ -111,7 +111,9 @@ Breakpoint 1 at 0x644295f54bb5: file /home/lin/workspace/qemu-4.1.1/target/riscv
 (gdb) c
 ```
 
-然后回到终端三，si单步执行我们发现的这条`sd`指令。此时终端二中的GDB会在`get_physical_address`函数处暂停，但观察发现第一次命中的地址并非预期：此时执行`p/x addr`查看却对应的是`0xffffffffc02000d6`这个地址，对应的是kern_init的入口地址。
+# 学长看这里！
+
+**然后回到终端三，si单步执行我们发现的这条`sd`指令。此时终端二中的GDB会在`get_physical_address`函数处暂停，但观察发现第一次命中的地址并非预期：此时执行`p/x addr`查看却对应的是`0xffffffffc02000d6`这个地址，对应的是kern_init的入口地址。**
 
 ```apl
 Thread 1 "qemu-system-ris" hit Breakpoint 1, get_physical_address (env=0x60f07eb8b9c0, physical=0x7ffe42962838, prot=0x7ffe42962830, addr=18446744072637907158, access_type=0, mmu_idx=1) at /home/lin/workspace/qemu-4.1.1/target/riscv/cpu_helper.c:158
@@ -121,7 +123,7 @@ $1 = 0xffffffffc02000d6
 (gdb) c
 ```
 
-而需要再次执行一次continue，下一次断点命中时，再次`p/x addr`查看，正确命中到了sd指令对应的内存访问地址。
+**而需要再次执行一次continue**，下一次断点命中时，再次`p/x addr`查看，正确命中到了sd指令对应的内存访问地址。
 
 ```apl
 Thread 3 "qemu-system-ris" hit Breakpoint 1, get_physical_address (env=0x60f07eb8b9c0, physical=0x79ef0cf06220, prot=0x79ef0cf06214, addr=18446744072637927416, access_type=1, mmu_idx=1) at /home/lin/workspace/qemu-4.1.1/target/riscv/cpu_helper.c:158
@@ -131,7 +133,7 @@ $2 = 0xffffffffc0204ff8
 (gdb) c
 ```
 
-我怀疑第一次命中对应地址是`0xffffffffc02000d6`这个地址，是由于取指翻译造成的，但是我们在`sd`这条指令之前已经执行了很多条指令，按理来说这页虚拟地址到物理地址的映射已经被存入了TLB中，查了一下可能是因为 GDB 的断点干扰（写内存可能导致 QEMU 刷新TLB），导致 `I-TLB` 失效，被迫重新翻译。询问大模型后，具体情况如下：
+**我怀疑第一次命中对应地址是`0xffffffffc02000d6`这个地址，是由于取指翻译造成的，但是我们在`sd`这条指令之前已经执行了很多条指令，按理来说这页虚拟地址到物理地址的映射已经被存入了TLB中，查了一下可能是因为 GDB 的断点干扰（写内存可能导致 QEMU 刷新TLB），导致 `I-TLB` 失效，被迫重新翻译。询问大模型后，具体情况如下：**
 
 ```
 // GDB设置软件断点的原理：
@@ -141,14 +143,14 @@ $2 = 0xffffffffc0204ff8
 // 4. 下次执行时需要重新翻译指令，触发I-TLB未命中
 ```
 
-为了第一次直接就能看到0xffffffffc0204ff8，可以在执行`sd`这条指令之前，把终端3中的断点删掉。
+**为了第一次直接就能看到0xffffffffc0204ff8，可以在执行`sd`这条指令之前，把终端3中的断点删掉。**
 
 ```apl
 (gdb) p/x addr
 $1 = 0xffffffffc0204ff8
 ```
 
-这样，第一次命中的就是我们`sd`指令访问内存的那个地址。
+**这样，第一次命中的就是我们`sd`指令访问内存的那个地址。**
 
 ```apl
 (gdb) watch *physical

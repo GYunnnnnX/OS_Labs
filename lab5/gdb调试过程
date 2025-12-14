@@ -1,0 +1,59 @@
+ps aux | grep qemu
+
+终端1：
+make debug
+终端2：
+pgrep -f qemu-system-riscv64
+sudo gdb
+
+attach 进程ID
+handle SIGPIPE nostop noprint
+
+break trans_ecall
+break riscv_cpu_do_interrupt
+break /home/lin/workspace/qemu-4.1.1/target/riscv/cpu_helper.c:509
+printf "【ECALL进入】priv=%d PC=0x%lx exc=0x%x(%d) stvec=0x%lx mstatus=0x%lx\n", 
+       env->priv, env->pc, cs->exception_index, cs->exception_index, env->stvec, env->mstatus
+break /home/lin/workspace/qemu-4.1.1/target/riscv/cpu_helper.c:548
+p/x cause
+break /home/lin/workspace/qemu-4.1.1/target/riscv/cpu_helper.c:588
+printf "【状态保存】mstatus=0x%lx(SPP=%ld SPIE=%ld SIE=%ld) scause=0x%lx sepc=0x%lx sbadaddr=0x%lx newPC=0x%lx newPriv=%d\n",
+       env->mstatus,
+       (env->mstatus >> 8) & 1,  
+       (env->mstatus >> 5) & 1, 
+       (env->mstatus >> 1) & 1,   
+       env->scause,
+       env->sepc,
+       env->sbadaddr,
+       env->pc,
+       env->priv
+break /home/lin/workspace/qemu-4.1.1/target/riscv/cpu_helper.c:591
+p cs->exception_index
+终端3：
+make gdb
+set remotetimeout unlimited
+add-symbol-file obj/__user_exit.out
+break /home/lin/workspace/OS_Labs/lab5/user/libs/syscall.c:18
+
+sret：
+终端3：
+break /home/lin/workspace/OS_Labs/lab5/kern/trap/trapentry.S:133
+终端2：
+break helper_sret
+printf "SRET入口: priv=%d sepc=0x%lx mstatus=0x%lx SPP=%ld SPIE=%ld SIE=%ld\n", 
+env->priv, 
+env->sepc, 
+env->mstatus, 
+(env->mstatus >> 8) & 1,
+(env->mstatus >> 5) & 1, 
+(env->mstatus >> 1) & 1
+
+break /home/lin/workspace/qemu-4.1.1/target/riscv/op_helper.c:100
+printf "【状态恢复】mstatus=0x%lx(SPP=%ld SPIE=%ld SIE=%ld) sepc=0x%lx newPC=0x%lx newPriv=%d\n",
+           env->mstatus,
+           (env->mstatus >> 8) & 1,  
+           (env->mstatus >> 5) & 1, 
+           (env->mstatus >> 1) & 1,   
+           env->sepc,
+           retpc,
+           env->priv
