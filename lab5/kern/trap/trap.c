@@ -30,8 +30,6 @@ static void print_ticks()
 #endif
 }
 
-static int cow_handle_fault(uintptr_t badva);
-
 /* idt_init - initialize IDT to each of the entry points in kern/trap/vectors.S */
 void idt_init(void)
 {
@@ -238,7 +236,7 @@ void exception_handler(struct trapframe *tf)
     case CAUSE_STORE_PAGE_FAULT:
         // 用户态写 COW 页：在这里完成复制与映射替换
         if (!trap_in_kernel(tf)) {
-            if (cow_handle_fault(tf->tval) == 0) {
+            if (cow_break_page(current->mm, tf->tval) == 0) {
                 // COW 处理完毕，直接返回继续执行
                 break;
             }

@@ -957,7 +957,7 @@ user_main(void *arg)
 #ifdef TEST
     KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE);
 #else
-    KERNEL_EXECVE(exit);
+    // KERNEL_EXECVE(exit);
     // KERNEL_EXECVE(badarg);
     // KERNEL_EXECVE(badsegment);
     // KERNEL_EXECVE(divezero);
@@ -974,6 +974,7 @@ user_main(void *arg)
     // KERNEL_EXECVE(yield);
 
     // KERNEL_EXECVE(cow_test);
+    KERNEL_EXECVE(dirtycow_test);
     panic("user_main execve failed.\n");
 #endif
     panic("user_main execve failed.\n");

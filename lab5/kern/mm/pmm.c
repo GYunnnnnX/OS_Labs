@@ -718,3 +718,122 @@ static int get_pgtable_items(size_t left, size_t right, size_t start,
     }
     return 0;
 }
+
+
+// ======================= Dirty-COW style buggy path =======================
+
+static int follow_user_page_buggy(pde_t *pgdir, uintptr_t uva, int write,
+                                  struct Page **page_store, pte_t **ptep_store)
+{
+    uintptr_t va;
+    pte_t *ptep;            // ✅ 先声明
+    struct Page *page;      // ✅ 先声明
+
+    va = ROUNDDOWN(uva, PGSIZE);
+
+retry:
+    ptep = get_pte(pgdir, va, 0);   // ✅ 这里只能是“语句”，不能是声明
+    if (ptep == NULL || !(*ptep & PTE_V)) return -E_INVAL;
+
+    if (write && ((*ptep & PTE_W) == 0)) {
+        if (*ptep & PTE_COW) {
+            write = 0;              // drop write semantics (bug)
+            goto retry;
+        }
+        return -E_INVAL;
+    }
+
+    page = pte2page(*ptep);
+    if (page == NULL) return -E_INVAL;
+
+    if (ptep_store) *ptep_store = ptep;
+    *page_store = page;
+    return 0;
+}
+
+int dirtycow_write_byte_buggy(struct mm_struct *mm, uintptr_t uva, uint8_t val) {
+    if (mm == NULL || mm->pgdir == NULL) return -E_INVAL;
+    if (!USER_ACCESS(uva, uva + 1)) return -E_INVAL;
+
+    struct Page *page = NULL;
+    pte_t *ptep = NULL;
+
+    int ret = follow_user_page_buggy(mm->pgdir, uva, 1, &page, &ptep);
+    if (ret != 0) return ret;
+
+    // "pin" (optional but safer)
+    page_ref_inc(page);
+
+    size_t off = PGOFF(uva);
+    ((uint8_t *)page2kva(page))[off] = val;   // <<< writes shared underlying page
+
+    page_ref_dec(page);
+
+    return 0;
+}
+
+
+// ======================= Fixed path =======================
+
+static int follow_user_page_fixed(struct mm_struct *mm, uintptr_t uva, bool write,
+                                  struct Page **page_store, pte_t **ptep_store) {
+    uintptr_t va = ROUNDDOWN(uva, PGSIZE);
+
+    // protect page table + COW break sequence
+    lock_mm(mm);
+
+    for (int tries = 0; tries < 4; tries++) {
+        pte_t *ptep = get_pte(mm->pgdir, va, 0);
+        if (ptep == NULL || !(*ptep & PTE_V)) {
+            unlock_mm(mm);
+            return -E_INVAL;
+        }
+
+        if (write && ((*ptep & PTE_W) == 0)) {
+            if (*ptep & PTE_COW) {
+                // MUST break COW, and retry STILL as write
+                int r = cow_break_page(mm, va);
+                if (r != 0) {
+                    unlock_mm(mm);
+                    return r;
+                }
+                continue;
+            }
+            unlock_mm(mm);
+            return -E_INVAL; // truly read-only mapping
+        }
+
+        struct Page *page = pte2page(*ptep);
+        if (page == NULL) {
+            unlock_mm(mm);
+            return -E_INVAL;
+        }
+
+        if (ptep_store) *ptep_store = ptep;
+        *page_store = page;
+
+        unlock_mm(mm);
+        return 0;
+    }
+
+    unlock_mm(mm);
+    return -E_INVAL;
+}
+
+int dirtycow_write_byte_fixed(struct mm_struct *mm, uintptr_t uva, uint8_t val) {
+    if (mm == NULL || mm->pgdir == NULL) return -E_INVAL;
+    if (!USER_ACCESS(uva, uva + 1)) return -E_INVAL;
+
+    struct Page *page = NULL;
+    pte_t *ptep = NULL;
+
+    int ret = follow_user_page_fixed(mm, uva, 1, &page, &ptep);
+    if (ret != 0) return ret;
+
+    page_ref_inc(page);
+    size_t off = PGOFF(uva);
+    ((uint8_t *)page2kva(page))[off] = val;
+    page_ref_dec(page);
+    return 0;
+}
+

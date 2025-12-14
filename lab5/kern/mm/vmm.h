@@ -40,6 +40,8 @@ struct mm_struct
     lock_t mm_lock;                // mutex for using dup_mmap fun to duplicat the mm
 };
 
+int cow_break_page(struct mm_struct *mm, uintptr_t badva);
+
 struct vma_struct *find_vma(struct mm_struct *mm, uintptr_t addr);
 struct vma_struct *vma_create(uintptr_t vm_start, uintptr_t vm_end, uint32_t vm_flags);
 void insert_vma_struct(struct mm_struct *mm, struct vma_struct *vma);
