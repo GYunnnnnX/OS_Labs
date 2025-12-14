@@ -667,3 +667,83 @@ Is Leaf? 1
 这确定了我们在翻译过程中进行的的确是大页映射，说明在建立页表时，是直接在根页表（Level 2）填入了一个指向物理地址 0x80204000 （或者其所属的 1GB 区域基址）的大页条目，所以 QEMU 只跑了一轮循环就找到了物理地址。
 
 然而，在 TLB 填充阶段，`riscv_cpu_tlb_fill` 调用 `tlb_set_page` 时传入的 size 参数始终为 `TARGET_PAGE_SIZE`（即 4KB）。这是因为 QEMU 的软件 TLB 实现为了简化设计，在将大页映射填入 TLB 时，会将其拆分为多个 4KB 粒度的条目进行管理，从而导致了页表粒度与 TLB 粒度在表现形式上的不一致。
+
+### 补充：函数调用链：
+
+我们已经知道了若未命中TLB，走的是如下的路径：
+
+```
+riscv_cpu_tlb_fill()->get_physical_address()
+					->tlb_set_page()
+```
+
+那么在`riscv_cpu_tlb_fill()`之前发生了什么呢，哪个函数负责做在查不到对应的TLB时调用riscv_cpu_tlb_fill()函数的逻辑呢？
+
+我们又在`riscv_cpu_tlb_fill()`这个函数的入口处打下断点，通过`bt`查看函数调用栈：
+
+```powershell
+(gdb) bt
+#0  riscv_cpu_tlb_fill (cs=0x5fdad1a28fb0, 
+    address=18446744072637927416, size=8, 
+    access_type=MMU_DATA_STORE, mmu_idx=1, probe=false, 
+    retaddr=125297785569605)
+    at /home/lin/workspace/qemu-4.1.1/target/riscv/cpu_helper.c:438
+#1  0x00005fdac12ceb0f in tlb_fill (cpu=0x5fdad1a28fb0, 
+    addr=18446744072637927416, size=8, 
+    access_type=MMU_DATA_STORE, mmu_idx=1, 
+    retaddr=125297785569605)
+    at /home/lin/workspace/qemu-4.1.1/accel/tcg/cputlb.c:878
+#2  0x00005fdac12d501e in store_helper (big_endian=false, 
+    size=8, retaddr=125297785569605, oi=49, val=2147486210, 
+    addr=18446744072637927416, env=0x5fdad1a319c0)
+    at /home/lin/workspace/qemu-4.1.1/accel/tcg/cputlb.c:1522
+#3  helper_le_stq_mmu (env=0x5fdad1a319c0, 
+    addr=18446744072637927416, val=2147486210, oi=49, 
+    retaddr=125297785569605)
+    at /home/lin/workspace/qemu-4.1.1/accel/tcg/cputlb.c:1672
+#4  0x000071f52a000145 in code_gen_buffer ()
+#5  0x00005fdac12f373b in cpu_tb_exec (cpu=0x5fdad1a28fb0, 
+    itb=0x71f52a000040 <code_gen_buffer+19>)
+--Type <RET> for more, q to quit, c to continue without paging--c
+    at /home/lin/workspace/qemu-4.1.1/accel/tcg/cpu-exec.c:173
+#6  0x00005fdac12f4581 in cpu_loop_exec_tb (cpu=0x5fdad1a28fb0, tb=0x71f52a000040 <code_gen_buffer+19>, last_tb=0x71f530bfd918, tb_exit=0x71f530bfd910) at /home/lin/workspace/qemu-4.1.1/accel/tcg/cpu-exec.c:621
+#7  0x00005fdac12f48b6 in cpu_exec (cpu=0x5fdad1a28fb0) at /home/lin/workspace/qemu-4.1.1/accel/tcg/cpu-exec.c:732
+#8  0x00005fdac12a6f16 in tcg_cpu_exec (cpu=0x5fdad1a28fb0) at /home/lin/workspace/qemu-4.1.1/cpus.c:1435
+#9  0x00005fdac12a77cf in qemu_tcg_cpu_thread_fn (arg=0x5fdad1a28fb0) at /home/lin/workspace/qemu-4.1.1/cpus.c:1743
+#10 0x00005fdac172bbd3 in qemu_thread_start (args=0x5fdad1a3f690) at util/qemu-thread-posix.c:502
+#11 0x000071f531494ac3 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:442
+#12 0x000071f5315268c0 in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:81
+```
+
+主要的调用逻辑就为`应用程序sd指令 → TCG翻译代码 → 首次访问地址 → TLB未命中 → 正常页表查询 → 建立TLB条目 → 继续执行`
+
+```
+1. 翻译阶段：将RISC-V指令翻译为TCG中间码
+2. 代码生成：将TCG中间码编译为本地机器码
+3. 执行阶段：执行生成的本地代码
+   ↓
+   当需要访存时，调用helper函数
+   ↓
+   helper函数检查TLB
+   ↓
+   TLB命中：直接访问
+   TLB未命中：调用tlb_fill()查询页表，也就是我们的riscv_cpu_tlb_fill()
+```
+
+其中检查TLB是否命中的逻辑就在store_helper这个函数中：
+
+```c++
+	// 如果 TLB 未命中，填充 TLB
+    if (!tlb_hit(tlb_addr, addr)) {
+        if (!victim_tlb_hit(env, mmu_idx, index, tlb_off,
+            addr & TARGET_PAGE_MASK)) {
+            tlb_fill(env_cpu(env), addr, size, MMU_DATA_STORE,
+                     mmu_idx, retaddr);
+            index = tlb_index(env, mmu_idx, addr);
+            entry = tlb_entry(env, mmu_idx, addr);
+        }
+        tlb_addr = tlb_addr_write(entry) & ~TLB_INVALID_MASK;    // 重新获取 TLB 地址
+    }
+```
+
+如果没有命中的话，就会调用tlb_fill()函数查询页表，也就是我们的riscv_cpu_tlb_fill()函数。
