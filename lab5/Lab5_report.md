@@ -8,7 +8,7 @@
 
 ### Q1：补充`load_icode`的第6步
 
-> 补充`load_icode`的第6步，建立相应的用户内存空间来放置应用程序的代码段、数据段等，且要设置好`proc_struct`结构中的成员变量`trapframe`中的内容，确保在执行此进程后，能够从应用程序设定的起始执行地址开始执行。设置正确的`trapframe`内容。
+> **补充`load_icode`的第6步，建立相应的用户内存空间来放置应用程序的代码段、数据段等，且要设置好`proc_struct`结构中的成员变量`trapframe`中的内容，确保在执行此进程后，能够从应用程序设定的起始执行地址开始执行。设置正确的`trapframe`内容。**
 
 **`do_execve`**函数调用`load_icode`函数来**加载**并**解析**一个处于内存中的**ELF**执行文件格式的应用程序。我们要补充的就是`load_icode`函数中的第六步。
 
@@ -63,18 +63,18 @@ struct trapframe
 
 - 调用`kernel_execve()`函数，加载用户程序。我们需要利用中断机制，这里面主要触发了一个`ebreak`（不用`ecall`的原因是，目前我们在 `S mode` 下，所以不能通过 `ecall` 来产生中断。我们这里采取一个取巧的办法，用 `ebreak` 产生断点中断进行处理，通过设置 `a7` 寄存器的值为10 （**特殊标识**）说明这不是一个普通的断点中断，而是要转发到 `syscall()`）。`trap.c`的`exception_handler()`函数中，对这个逻辑进行了判断：
 
-  ```c
-  case CAUSE_BREAKPOINT:
-      cprintf("Breakpoint\n");
-      if (tf->gpr.a7 == 10)//判断
-      {
-          tf->epc += 4; //跳过ebreak指令，防止死循环
-          syscall(); //调用syscall()
-          kernel_execve_ret(tf, current->kstack + KSTACKSIZE);
-      }
-  ```
+	```c
+	case CAUSE_BREAKPOINT:
+	    cprintf("Breakpoint\n");
+	    if (tf->gpr.a7 == 10)//判断
+	    {
+	        tf->epc += 4; //跳过ebreak指令，防止死循环
+	        syscall(); //调用syscall()
+	        kernel_execve_ret(tf, current->kstack + KSTACKSIZE);
+	    }
+	```
 
-  其中的`kernel_execve_ret()`函数，它负责复制`trapframe`到新的栈顶，并且正常返回用户态。
+	其中的`kernel_execve_ret()`函数，它负责复制`trapframe`到新的栈顶，并且正常返回用户态。
 
 - 中断返回后，调用`sys_exec()`函数，它又会调用`do_execve()`函数，它会清空当前的进程内存空间，再调用`load_icode()`函数，来为新的进程加载内容（具体流程在Q1中已经介绍）。
 
@@ -82,25 +82,25 @@ struct trapframe
 
 - 经过时钟中断、调度器选中后，这个用户态进程被选择占用CPU执行了。那么需要调用`proc_run()`函数，让进程真正“跑起来”。
 
-  当需要切换进程时，`proc_run()`函数会执行以下内容：
+	当需要切换进程时，`proc_run()`函数会执行以下内容：
 
-  ```c
-  bool intr_flag;
-  local_intr_save(intr_flag); //禁用中断
-  struct proc_struct *prev = current;
-  current = proc;
-  lsatp(proc->pgdir); //切换页表，使用进程自己的虚拟地址空间
-  switch_to(&(prev->context), &(proc->context)); //切换上下文
-  local_intr_restore(intr_flag);//启用中断
-  ```
+	```c
+	bool intr_flag;
+	local_intr_save(intr_flag); //禁用中断
+	struct proc_struct *prev = current;
+	current = proc;
+	lsatp(proc->pgdir); //切换页表，使用进程自己的虚拟地址空间
+	switch_to(&(prev->context), &(proc->context)); //切换上下文
+	local_intr_restore(intr_flag);//启用中断
+	```
 
-  先禁用中断（结束后再启用），然后切换页表、切换上下文。
+	先禁用中断（结束后再启用），然后切换页表、切换上下文。
 
 - `switch_to`中，保存旧进程的上下文，恢复新进程的上下文。然后，调用`ret`，跳转到`ra`（即`forkret`函数）。再`forkrets`汇编方法中，先进行 `move sp, a0`，将栈指针设置为指向`trapframe`；然后执行`j __trapret`跳到`__trapret`方法。`__trapret`中，进行`RESTORE_ALL` 恢复所有寄存器，然后执行`sret`返回用户态。
 
 - `sret`后，硬件完成以下操作：PC从`sepc`（被设为`elf->e_entry`）中读取值（即下一条指令对应了应用程序的**第一条指令**了）；
 
-  特权级设为`sstatus.SPP`（0，用户态），再把`sstatus.SPP`置0；`SIE`设为`sstatus.SPIE`（1，开启中断），再把`sstatus.SPIE`置1。
+	特权级设为`sstatus.SPP`（0，用户态），再把`sstatus.SPP`置0；`SIE`设为`sstatus.SPIE`（1，开启中断），再把`sstatus.SPIE`置1。
 
 至此，CPU下一条就开始执行程序的**第一条**指令了。
 
@@ -108,9 +108,7 @@ struct trapframe
 
 ## 练习2：父进程复制自己的内存空间给子进程
 
-> 创建子进程的函数`do_fork`在执行中将拷贝当前进程（即父进程）的用户内存地址空间中的合法内容到新进程中（子进程），完成内存资源的复制。具体是通过`copy_range`函数（位于kern/mm/pmm.c中）实现的，请补充`copy_range`的实现，确保能够正确执行。
->
-> 请在实验报告中简要说明你的设计实现过程。
+> **创建子进程的函数`do_fork`在执行中将拷贝当前进程（即父进程）的用户内存地址空间中的合法内容到新进程中（子进程），完成内存资源的复制。具体是通过`copy_range`函数（位于kern/mm/pmm.c中）实现的，请补充`copy_range`的实现，确保能够正确执行。**
 
 创建用户子进程时，会通过系统调用 `sys_fork()` 调用对应内核函数 `do_fork()`，我们的期望是子进程要拥有一份和父进程一样的用户地址空间，而 `do_fork()` 完整流程是：
 
@@ -302,130 +300,130 @@ syscall(int64_t num, ...) {
 
 - `trap()`（`kern/trap/trap.c`）调用`trap_dispatch()`函数，将这个`ecall`分发给`exception_handler()`处理。
 
-  ```c
-  case CAUSE_USER_ECALL:
-          // cprintf("Environment call from U-mode\n");
-          tf->epc += 4;
-          syscall();//调用syscall()
-          break;
-  ```
+	```c
+	case CAUSE_USER_ECALL:
+	        // cprintf("Environment call from U-mode\n");
+	        tf->epc += 4;
+	        syscall();//调用syscall()
+	        break;
+	```
 
 - `syscall()`函数如下，它会接受寄存器中的参数并解析：
 
-  ```c
-  void
-  syscall(void) {
-      struct trapframe *tf = current->tf;
-      uint64_t arg[5];
-      int num = tf->gpr.a0;
-      if (num >= 0 && num < NUM_SYSCALLS) {
-          if (syscalls[num] != NULL) {
-              arg[0] = tf->gpr.a1;
-              arg[1] = tf->gpr.a2;
-              arg[2] = tf->gpr.a3;
-              arg[3] = tf->gpr.a4;
-              arg[4] = tf->gpr.a5;
-              tf->gpr.a0 = syscalls[num](arg);
-              return ;
-          }
-      }
-      print_trapframe(tf);
-      panic("undefined syscall %d, pid = %d, name = %s.\n",
-              num, current->pid, current->name);
-  }
-  ```
+	```c
+	void
+	syscall(void) {
+	    struct trapframe *tf = current->tf;
+	    uint64_t arg[5];
+	    int num = tf->gpr.a0;
+	    if (num >= 0 && num < NUM_SYSCALLS) {
+	        if (syscalls[num] != NULL) {
+	            arg[0] = tf->gpr.a1;
+	            arg[1] = tf->gpr.a2;
+	            arg[2] = tf->gpr.a3;
+	            arg[3] = tf->gpr.a4;
+	            arg[4] = tf->gpr.a5;
+	            tf->gpr.a0 = syscalls[num](arg);
+	            return ;
+	        }
+	    }
+	    print_trapframe(tf);
+	    panic("undefined syscall %d, pid = %d, name = %s.\n",
+	            num, current->pid, current->name);
+	}
+	```
 
 - 下面就是在**内核**中**分别**对`fork/exec/wait/exit`进行进一步操作了。注意，这里包括了`exec`。我们在本部分之前的分析没有包括`exec`，是因为我们这里的分析都是从用户态调用来的，而`exec`不需要用户调用。
 
-  **那么`exec`是从哪来的呢？**
+	**那么`exec`是从哪来的呢？**
 
-  我们之前分析过了，`exec`是在内核中调用的，而在内核中我们不能用`ecall`，我们用的是`ebreak`指令，用 `ebreak` 产生断点中断进行处理，通过设置 `a7` 寄存器的值为10 （特殊标识）说明这不是一个普通的断点中断，而是要转发到 `syscall()`。所以，`exec`的执行流在此处与`fork/wait/exit`汇合了，由`syscall()`统一调度，分配到下面的函数中：
+	我们之前分析过了，`exec`是在内核中调用的，而在内核中我们不能用`ecall`，我们用的是`ebreak`指令，用 `ebreak` 产生断点中断进行处理，通过设置 `a7` 寄存器的值为10 （特殊标识）说明这不是一个普通的断点中断，而是要转发到 `syscall()`。所以，`exec`的执行流在此处与`fork/wait/exit`汇合了，由`syscall()`统一调度，分配到下面的函数中：
 
-  ```c
-  static int
-  sys_exit(uint64_t arg[]) {
-      int error_code = (int)arg[0];
-      return do_exit(error_code);
-  }
-  
-  static int
-  sys_fork(uint64_t arg[]) {
-      struct trapframe *tf = current->tf;
-      uintptr_t stack = tf->gpr.sp;
-      return do_fork(0, stack, tf);
-  }
-  
-  static int
-  sys_wait(uint64_t arg[]) {
-      int pid = (int)arg[0];
-      int *store = (int *)arg[1];
-      return do_wait(pid, store);
-  }
-  
-  static int
-  sys_exec(uint64_t arg[]) {
-      const char *name = (const char *)arg[0];
-      size_t len = (size_t)arg[1];
-      unsigned char *binary = (unsigned char *)arg[2];
-      size_t size = (size_t)arg[3];
-      return do_execve(name, len, binary, size);
-  }
-  ```
+	```c
+	static int
+	sys_exit(uint64_t arg[]) {
+	    int error_code = (int)arg[0];
+	    return do_exit(error_code);
+	}
+	
+	static int
+	sys_fork(uint64_t arg[]) {
+	    struct trapframe *tf = current->tf;
+	    uintptr_t stack = tf->gpr.sp;
+	    return do_fork(0, stack, tf);
+	}
+	
+	static int
+	sys_wait(uint64_t arg[]) {
+	    int pid = (int)arg[0];
+	    int *store = (int *)arg[1];
+	    return do_wait(pid, store);
+	}
+	
+	static int
+	sys_exec(uint64_t arg[]) {
+	    const char *name = (const char *)arg[0];
+	    size_t len = (size_t)arg[1];
+	    unsigned char *binary = (unsigned char *)arg[2];
+	    size_t size = (size_t)arg[3];
+	    return do_execve(name, len, binary, size);
+	}
+	```
 
-  至此，`fork/exec/wait/exit`的操作就都分发至了`do_fork()/do_exec()/do_wait()/do_exit()`函数中了。从`__alltraps`一直到这里，都是在**内核态**中完成的。而**`do_execve`**函数是如何调用`load_icode`函数、再到**返回用户态**执行指令的过程，我们在**练习一**中分析过了，此处不再重复分析了。而`do_exit()`和`do_wait()`到这里就不是我们目前实验的重点了，所以我们以`do_fork()`为例继续向下分析。
+	至此，`fork/exec/wait/exit`的操作就都分发至了`do_fork()/do_exec()/do_wait()/do_exit()`函数中了。从`__alltraps`一直到这里，都是在**内核态**中完成的。而**`do_execve`**函数是如何调用`load_icode`函数、再到**返回用户态**执行指令的过程，我们在**练习一**中分析过了，此处不再重复分析了。而`do_exit()`和`do_wait()`到这里就不是我们目前实验的重点了，所以我们以`do_fork()`为例继续向下分析。
 
 - `do_fork()`的主要操作如下：
 
-  ```c
-  int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
-  {   ...
-      proc = alloc_proc();
-      if (proc == NULL)
-      {
-          goto fork_out;
-      }
-      // 设置父节点和获取pid号
-      proc->parent = current;
-      proc->pid = get_pid();
-      // 调用函数setup_kstack()和copy_mm()，并且检查运行结果
-      if (setup_kstack(proc) != 0)
-      {goto bad_fork_cleanup_proc;}
-      if (copy_mm(clone_flags, proc) != 0)
-      {goto bad_fork_cleanup_kstack;}
-      // 设置tf & context
-      copy_thread(proc, stack, tf);
-      // 插入hash_list和proc_list
-      hash_proc(proc);
-      list_add(&proc_list, &(proc->list_link));
-      nr_process++;
-      // 唤醒进程
-      wakeup_proc(proc);
-      ret = proc->pid;
-  fork_out:
-      return ret;
-      ...}
-  ```
+	```c
+	int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
+	{   ...
+	    proc = alloc_proc();
+	    if (proc == NULL)
+	    {
+	        goto fork_out;
+	    }
+	    // 设置父节点和获取pid号
+	    proc->parent = current;
+	    proc->pid = get_pid();
+	    // 调用函数setup_kstack()和copy_mm()，并且检查运行结果
+	    if (setup_kstack(proc) != 0)
+	    {goto bad_fork_cleanup_proc;}
+	    if (copy_mm(clone_flags, proc) != 0)
+	    {goto bad_fork_cleanup_kstack;}
+	    // 设置tf & context
+	    copy_thread(proc, stack, tf);
+	    // 插入hash_list和proc_list
+	    hash_proc(proc);
+	    list_add(&proc_list, &(proc->list_link));
+	    nr_process++;
+	    // 唤醒进程
+	    wakeup_proc(proc);
+	    ret = proc->pid;
+	fork_out:
+	    return ret;
+	    ...}
+	```
 
-  至于`do_fork()`的具体实现，我们在上次的实验中已经详细做过了，此处不再赘述。下面，完成了fork操作的使命，该准备返回**用户态**了。
+	至于`do_fork()`的具体实现，我们在上次的实验中已经详细做过了，此处不再赘述。下面，完成了fork操作的使命，该准备返回**用户态**了。
 
 - 下面的过程，就是一步一步返回了：
 
-  ```c
-  static int
-  sys_fork(uint64_t arg[]) {
-      struct trapframe *tf = current->tf;
-      uintptr_t stack = tf->gpr.sp;
-      return do_fork(0, stack, tf);
-  }
-  ```
+	```c
+	static int
+	sys_fork(uint64_t arg[]) {
+	    struct trapframe *tf = current->tf;
+	    uintptr_t stack = tf->gpr.sp;
+	    return do_fork(0, stack, tf);
+	}
+	```
 
-  `do_fork()`返回进程号，再到`sys_fork()`进一步返回到`syscall()`，在这里将`PID`写入`tf->gpr.a0`。下面，返回`exception_handler()`，返回`trap_dispatch()`，返回`trap()`，再次返回，就到了内核态开始的地方：`__alltraps`。
+	`do_fork()`返回进程号，再到`sys_fork()`进一步返回到`syscall()`，在这里将`PID`写入`tf->gpr.a0`。下面，返回`exception_handler()`，返回`trap_dispatch()`，返回`trap()`，再次返回，就到了内核态开始的地方：`__alltraps`。
 
-  `trap()`的使命完成，它的下一个命令就是`j __trapret`。`__trapret`中，进行`RESTORE_ALL` 恢复所有寄存器，然后执行`sret`，硬件会完成以下操作：PC从`sepc`中读取值、特权级设为`sstatus.SPP`（0，用户态），再把`sstatus.SPP`置0；设置`sstatus.SPIE`等......
+	`trap()`的使命完成，它的下一个命令就是`j __trapret`。`__trapret`中，进行`RESTORE_ALL` 恢复所有寄存器，然后执行`sret`，硬件会完成以下操作：PC从`sepc`中读取值、特权级设为`sstatus.SPP`（0，用户态），再把`sstatus.SPP`置0；设置`sstatus.SPIE`等......
 
-  至此，就重新切换回**用户态**了，也意味着**fork/exec/wait/exit**操作都执行完成了。
+	至此，就重新切换回**用户态**了，也意味着**fork/exec/wait/exit**操作都执行完成了。
 
-  
+	
 
 > 问题：请给出ucore中一个用户态进程的执行状态生命周期图（包执行状态，执行状态之间的变换关系，以及产生变换的事件或函数调用）。（字符方式画即可）
 
@@ -505,9 +503,384 @@ syscall(int64_t num, ...) {
 
 
 
-## 拓展练习 Challenge
+## 拓展练习 Challenge1：实现 Copy on Write （COW）机制
 
-### Q2：说明该用户程序是何时被预先加载到内存中的？与我们常用操作系统的加载有何区别，原因是什么？
+> 在ucore操作系统中，当一个用户父进程创建自己的子进程时，父进程会把其申请的用户空间设置为只读，子进程可共享父进程占用的用户内存空间中的页面（这就是一个共享的资源）。当其中任何一个进程修改此用户内存空间中的某页面时，ucore会通过page fault异常获知该操作，并完成拷贝内存页面，使得两个进程都有各自的内存页面。这样一个进程所做的修改不会被另外一个进程可见了。请在ucore中实现这样的COW机制。
+
+**原本的 fork 机制是：**当父进程创建子进程时，重新申请一块新的内存空间作为子进程的用户空间，将父进程的用户空间内容完全复制到其中。
+
+**COW 的 fork 机制是：**当父进程创建子进程时，不重新申请内存空间，而是仅仅将子进程用户空间指针指向父进程的用户空间，从而让两个进程共享父进程原本的用户空间（因为如果仅仅是读操作的话其实不需要浪费新的空间）。仅当两个进程之一进行了写操作，才申请新空间并将资源拷贝过去，作为申请写操作的进程的用户空间（而这个过程是通过”写缺页“后的异常处理来实现的）。
+
+### 具体的实现思路和代码：
+
+#### 1. 设计一个新的PTE标志位 PTE_COW
+
+在COW机制下，我们需要知道每个PTE是不是处在“被共享读”的状态，这个状态原本是不存在的，因此需要设计一个新的PTE标志位 PTE_COW，这里发现8/9两个bit位是预留的，选择8-bit位作为COW标志位：
+
+```c
+// old:
+#define PTE_SOFT 0x300 // Reserved for Software
+
+// new:
+#define PTE_COW 0x100 // use PTE_SOFT bit8 as Copy-On-Write mark
+#define PTE_SOFT 0x200 // Reserved for Software
+```
+
+#### 2. 更新 fork 机制（改写 copy_range 方法）
+
+原本的实现是通过fork调用copy_range函数，来实现每个父页的复制，现在需要换成新的逻辑：
+
+**若该页原本是一个可写页：**那么将该页设为不可写，并增加COW标记，然后将子进程页表项映射到该页的同一物理页，同样设置只读+COW，最后刷新父进程对应地址的TLB
+
+**若该页原本是一个只读页：**那么该页本来就不可写，即便 fork 出去也是不可以转化为可写页的，因此不设置 COW，直接设置父子进程共享该页即可
+
+```c
+int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end, bool share)
+{
+    assert(start % PGSIZE == 0 && end % PGSIZE == 0);
+    assert(USER_ACCESS(start, end));
+    // copy content by page unit.
+    do
+    {
+        // call get_pte to find process A's pte according to the addr start
+        pte_t *ptep = get_pte(from, start, 0);
+        if (ptep == NULL)
+        {
+            start = ROUNDDOWN(start + PTSIZE, PTSIZE);
+            continue;
+        }
+        // LAB5:CHALLENGE1 2310724
+        if (*ptep & PTE_V) 
+        {
+            uint32_t perm = (*ptep & PTE_USER);
+            // 不再申请新页（而是只找到父进程的页用于共享）
+            struct Page *page = pte2page(*ptep);
+            assert(page != NULL);
+
+            // 可写页/或者原本就是 COW 页：共享 + 启用 COW
+            if ((*ptep & PTE_W) || (*ptep & PTE_COW)) {
+                uint32_t perm_cow = (perm & ~PTE_W) | PTE_COW;
+
+                // 子进程映射共享页
+                int ret = page_insert(to, page, start, perm_cow);
+                if (ret != 0) return ret;
+
+                // 父进程也改成只读 + COW（只改位，不重建）
+                *ptep = (*ptep & ~PTE_W) | PTE_COW;
+                tlb_invalidate(from, start);
+            } else {
+                // 只读页：直接共享（不加 COW）
+                int ret = page_insert(to, page, start, perm);
+                if (ret != 0) return ret;
+            }
+        }
+        start += PGSIZE;
+    } while (start != 0 && start < end);
+    return 0;
+}
+```
+
+#### 3. 写缺页异常处理：复制新页
+
+如果是用户态COW页发生写缺页，那么完成COW机制下的新页复制，否则进行正常缺页处理：
+
+```c
+    case CAUSE_STORE_PAGE_FAULT:
+        // 用户态写 COW 页：在这里完成复制与映射替换
+        if (!trap_in_kernel(tf)) {
+            if (cow_handle_fault(tf->tval) == 0) {
+                break; // COW 处理完毕，直接返回继续执行
+            }
+            // 只读页写错误处理
+        }
+        // 普通缺页处理
+        break;
+```
+
+新页复制工作在cow_handle_fault()函数完成：
+
+根据对应的物理页的被引用计数情况，如果判断ref > 1，确实是共享页，那么分配新物理页、拷贝原页内容，最后重新映射为可写私有页；否则说明仅被本进程使用，直接修改PTE标志位即可（恢复写权限，清除COW标志）
+
+```c
+static int cow_handle_fault(uintptr_t badva) {
+    if (current == NULL || current->mm == NULL) return -1;
+
+    uintptr_t va = ROUNDDOWN(badva, PGSIZE);
+    pde_t *pgdir = current->mm->pgdir;
+
+    pte_t *ptep = get_pte(pgdir, va, 0);
+    if (ptep == NULL) return -1;
+    if (!(*ptep & PTE_V)) return -1;
+
+    // 仅处理 COW 页
+    if ((*ptep & PTE_COW) == 0) return -1;
+    assert((*ptep & PTE_W) == 0); // 确认一下 COW 页不可写
+
+    // 获取对应物理页
+    struct Page *page = pte2page(*ptep);
+    if (page == NULL) return -1;
+
+    // 构造“写后”的权限（去 COW + 恢复写）
+    uint32_t perm = (*ptep & PTE_USER);
+    perm = (perm | PTE_W) & ~PTE_COW;
+
+    // ref > 1：说明当前物理页真的被共享了，则复制一份新的物理页
+    if (page_ref(page) > 1) {
+        struct Page *npage = alloc_page();
+        if (npage == NULL) return -1;
+
+        memcpy(page2kva(npage), page2kva(page), PGSIZE);
+
+        // 用新页覆盖当前进程映射为可写
+        if (page_insert(pgdir, npage, va, perm) != 0) {
+            free_page(npage);
+            return -1;
+        }
+    } else {
+        // ref==1：说明当前页只被本进程使用，直接修改 PTE 即可
+        *ptep = (*ptep & ~PTE_COW) | PTE_W;
+        tlb_invalidate(pgdir, va);
+    }
+    return 0;
+}
+```
+
+### 测试用例设计：
+
+> 设计了一组覆盖典型与边界场景的用户态测试用例：
+>
+> 1. **data / bss 基本 COW 隔离**
+> 2. **多子进程写同一页（ref > 1）**
+> 3. **子进程退出后父进程写（ref == 1 快路径）**
+> 4. **跨页写入（逐页触发 COW）**
+> 5. **模拟匿名页/堆写入**
+> 6. **只读页写入（应被异常终止）**
+
+```c
+#include <ulib.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+#define PGSIZE 4096
+
+static void t_fail(const char *name, const char *msg) {
+    cprintf("[FAIL] %s: %s\n", name, msg);
+    exit(-1);
+}
+static void t_pass(const char *name) {
+    cprintf("[PASS] %s\n", name);
+}
+
+typedef int (*case_fn_t)(void);
+
+/* 运行单个 case：
+ * - 子进程 exit(0) => PASS
+ * - 子进程 exit(!=0) => FAIL
+ * - expect_killed=1：期望子进程异常退出（exit_code != 0）
+ * - 返回值：0=PASS，-1=FAIL
+ */
+static int run_case(const char *name, case_fn_t fn, int expect_killed) {
+    int pid = fork();
+    if (pid < 0) {
+        cprintf("[FAIL] %s: fork failed\n", name);
+        return -1;
+    }
+    if (pid == 0) {
+        int r = fn();
+        exit(r);
+    }
+
+    int code = 0x12345678; // 哨兵值，便于发现 store 没被写
+    int ret = waitpid(pid, &code);
+    if (ret != 0) {
+        cprintf("[FAIL] %s: waitpid failed (ret=%d)\n", name, ret);
+        return -1;
+    }
+
+    if (!expect_killed) {
+        if (code == 0) { t_pass(name); return 0; }
+        cprintf("[FAIL] %s: exit code=%d (expected 0)\n", name, code);
+        return -1;
+    } else {
+        if (code != 0) { t_pass(name); return 0; }
+        cprintf("[FAIL] %s: exit code=0 (expected killed)\n", name);
+        return -1;
+    }
+}
+
+/* ===================== 全局测试数据区 ===================== */
+// data/bss：可写页必须触发 COW
+static volatile int g_data = 42;
+static volatile int g_bss;
+
+// 跨页：两页 buffer（可写页）
+static char g_buf[PGSIZE * 2];
+
+// 模拟“匿名页/堆”
+static char g_heap_like[PGSIZE * 2];
+
+/* ===================== Case 1：基础 COW（data/bss） ===================== */
+static int case_basic_data_bss(void) {
+    g_data = 42;
+    g_bss  = 100;
+
+    int pid = fork();
+    if (pid < 0) return -1;
+
+    if (pid == 0) {
+        if (g_data != 42 || g_bss != 100) return -2;
+        g_data = 7;
+        g_bss  = 9;
+        if (g_data != 7 || g_bss != 9) return -3;
+        return 0;
+    }
+
+    int code = 0;
+    if (waitpid(pid, &code) != 0 || code != 0) return -4;
+
+    if (g_data != 42 || g_bss != 100) return -5;
+    return 0;
+}
+
+/* ===================== Case 2：多共享者写隔离（ref>1 路径） ===================== */
+static int case_multi_writer_ref_gt1(void) {
+    g_data = 1;
+
+    int pid1 = fork();
+    if (pid1 < 0) return -1;
+    if (pid1 == 0) { g_data = 10; return (g_data == 10) ? 0 : -2; }
+
+    int pid2 = fork();
+    if (pid2 < 0) return -3;
+    if (pid2 == 0) { g_data = 20; return (g_data == 20) ? 0 : -4; }
+
+    int code = 0;
+    if (waitpid(pid1, &code) != 0 || code != 0) return -5;
+    if (waitpid(pid2, &code) != 0 || code != 0) return -6;
+
+    if (g_data != 1) return -7;
+    return 0;
+}
+
+/* ===================== Case 3：ref==1 快路径（子退出后父写） ===================== */
+static int case_ref_eq1_fastpath(void) {
+    g_data = 5;
+
+    int pid = fork();
+    if (pid < 0) return -1;
+
+    if (pid == 0) {
+        g_data = 8;
+        return (g_data == 8) ? 0 : -2;
+    }
+
+    int code = 0;
+    if (waitpid(pid, &code) != 0 || code != 0) return -3;
+
+    // 子退出后，父写：应该不崩溃且值正确
+    g_data = 9;
+    if (g_data != 9) return -4;
+    return 0;
+}
+
+/* ===================== Case 4：跨页逐页 COW ===================== */
+static int case_cross_page(void) {
+    g_buf[0] = 'A';
+    g_buf[PGSIZE] = 'B';
+
+    int pid = fork();
+    if (pid < 0) return -1;
+
+    if (pid == 0) {
+        g_buf[0] = 'C';
+        g_buf[PGSIZE] = 'D';
+        if (g_buf[0] != 'C') return -2;
+        if (g_buf[PGSIZE] != 'D') return -3;
+        return 0;
+    }
+
+    int code = 0;
+    if (waitpid(pid, &code) != 0 || code != 0) return -4;
+
+    if (g_buf[0] != 'A') return -5;
+    if (g_buf[PGSIZE] != 'B') return -6;
+
+    return 0;
+}
+
+/* ===================== Case 5：模拟“堆/匿名页”写 COW ===================== */
+static int case_heap_like(void) {
+    memset(g_heap_like, 0x11, sizeof(g_heap_like));
+
+    int pid = fork();
+    if (pid < 0) return -1;
+
+    if (pid == 0) {
+        g_heap_like[0] = 0x22;
+        g_heap_like[PGSIZE] = 0x33;
+        if ((unsigned char)g_heap_like[0] != 0x22) return -2;
+        if ((unsigned char)g_heap_like[PGSIZE] != 0x33) return -3;
+        return 0;
+    }
+
+    int code = 0;
+    if (waitpid(pid, &code) != 0 || code != 0) return -4;
+
+    if ((unsigned char)g_heap_like[0] != 0x11) return -5;
+    if ((unsigned char)g_heap_like[PGSIZE] != 0x11) return -6;
+    return 0;
+}
+
+/* ===================== Case 6：只读写应被 kill（非 COW） ===================== */
+static int case_readonly_write_should_kill(void) {
+    const char *s = "readonly";
+    ((char *)s)[0] = 'X';   // 应触发 store page fault，且不是 COW -> do_exit(-E_KILLED)
+    return 0;               // 正常情况下到不了这里
+}
+
+int main(void) {
+    cprintf("=== COW final test suite start (pid=%d) ===\n", getpid());
+
+    int failed = 0;
+    failed |= (run_case("1) 基础：data/bss COW 隔离", case_basic_data_bss, 0) != 0);
+    failed |= (run_case("2) 多写者：ref>1 写隔离",     case_multi_writer_ref_gt1, 0) != 0);
+    failed |= (run_case("3) ref==1：子退出后父写",     case_ref_eq1_fastpath, 0) != 0);
+    failed |= (run_case("4) 跨页：逐页触发 COW",       case_cross_page, 0) != 0);
+    failed |= (run_case("5) 匿名页：模拟堆写 COW",     case_heap_like, 0) != 0);
+    failed |= (run_case("6) 只读写：应异常终止",       case_readonly_write_should_kill, 1) != 0);
+
+    if (!failed) {
+        cprintf("=== COW final test suite PASS ===\n");
+        return 0;
+    } else {
+        cprintf("=== COW final test suite FAIL ===\n");
+        return -1;
+    }
+}
+```
+
+> **所有测试均通过 `fork + waitpid(pid, &code)` 精确回收子进程并检查退出状态。**
+
+![image-20251214172439274](./img/image-20251214172439274.png)
+
+
+
+### FSM设计示意图：
+
+> 简易版本
+
+![image-20251214173222334](./img/image-20251214173222334.png)
+
+> 详细版本（区分COW页的ref，也就是是否是真正的共享页）
+
+![image-20251214173240910](./img/image-20251214173240910.png)
+
+
+
+## 拓展练习 Challenge2
+
+> **说明该用户程序是何时被预先加载到内存中的？与我们常用操作系统的加载有何区别，原因是什么？**
 
 答：用户程序在编译链接阶段就被嵌入到内核镜像中。该用户程序从`user/exit.c` 到 `obj/__user_exit.out`。再链接到内核：
 
@@ -630,3 +1003,16 @@ kern_execve("exit", _binary_obj___user_exit_out_start,_binary_obj___user_exit_ou
 
 此外，我们现在还没实现**进程调度算法**（将在下一次实验中实现）。
 
+
+
+
+
+
+
+
+
+![image-20251214145716711](./img/image-20251214145716711.png)
+
+
+
+![image-20251214145943103](./img/image-20251214145943103.png)

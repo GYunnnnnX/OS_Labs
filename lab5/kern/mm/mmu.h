@@ -88,7 +88,7 @@
 #define READ_EXEC (PTE_R | PTE_X | PTE_V)
 #define READ_WRITE_EXEC (PTE_R | PTE_W | PTE_X | PTE_V)
 
-#define PTE_USER (PTE_R | PTE_W | PTE_X | PTE_U | PTE_V)
+#define PTE_USER (PTE_R | PTE_W | PTE_X | PTE_U)
 
 
 #endif /* !__KERN_MM_MMU_H__ */
