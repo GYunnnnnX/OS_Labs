@@ -539,7 +539,86 @@ QEMU 启动后关键现象如下：
 
 ## 扩展练习 Challenge 1：实现 Stride Scheduling 调度算法
 
-## 扩展练习 Challenge 2：更多调度算法及分析
+### 多级反馈队列调度算法设计
 
-> 在ucore上实现尽可能多的各种基本调度算法(FIFO, SJF,...)，并设计各种测试用例，能够定量地分析出各种调度算法在各种指标上的差异，说明调度算法的适用范围
+#### 核心数据结构设计
 
+在 lab6 框架里新增一个 `mlfq_sched_class`，并扩展/复用 `run_queue`：
+
+- **多条就绪队列**：`Q0...Q(L-1)`（优先级从高到低），每条队列可以用**链表**实现 RR。
+- **每级不同时间片**：例如 \(ts[q] = 2^q\) 或线性增长；**高优先级**时间片**短**、**低优先级**时间片**长**。
+- **进程需要新增字段**（可放进 `proc_struct`）：
+  - `mlfq_level`：当前所在队列层级
+  - `mlfq_ticks_left`：当前层级剩余时间片
+
+#### 接口实现要点（对应 `sched_class` 函数指针）
+
+- **`init(rq)`**
+  - 初始化每个队列链表为空
+  - 设置各层 `time_slice` 参数
+  - 初始化全局 tick / 提升周期计数器（如 `boost_interval`）
+
+- **`enqueue(rq, proc)`**
+  - 新进程或被唤醒进程：默认进入 **高优先级队列**（如 `Q0`），或进入其 `mlfq_level` 指定队列（取决于策略）
+  - `proc->mlfq_ticks_left = ts[proc->mlfq_level]`
+  - 插入对应队列尾部（`list_add_before` 到哨兵前）
+
+- **`dequeue(rq, proc)`**
+  - 从其所在队列删除（`list_del_init`）
+
+- **`pick_next(rq)`**
+  - 从高到低扫描队列，取**第一个非空队列的队头**作为 next
+  - 这一步实现了“反馈”：优先运行高优先级队列中的进程
+
+- **`proc_tick(rq, proc)`**
+  - `proc->mlfq_ticks_left--`
+  - 若用完时间片：
+    - **降级**：`mlfq_level = min(level+1, L-1)`
+    - `need_resched = 1`（触发下一次调度）
+  - 若发生周期性 **priority boost**（防饥饿）：
+    - 把所有队列中的进程提升回 `Q0`（或提升一级），并重置其时间片
+    - 这通常放在 `proc_tick` 中基于全局 tick 触发
+
+#### 防饥饿机制
+
+- **周期性提升（boost）**：每隔 `T` 个 tick，将所有 runnable 进程拉回高优先级队列。
+- 或 **老化（aging）**：进程等待超过阈值就提升一级。
+
+### Stride 调度：为何“足够长时间后，各进程获得时间片数与优先级成正比”
+
+Stride 的核心规则是：
+
+- 每个进程有一个累计量 `stride`。
+
+- 每次被选中运行后更新：
+  $$
+  stride_i \leftarrow stride_i + \frac{BIG\_STRIDE}{priority_i}
+  $$
+
+- 调度器每次选择 **stride 最小** 的进程运行。
+
+- 把 `stride` 看成进程的“虚拟进度”。谁的 `stride` 小，说明它在虚拟进度上“落后”，就优先补给它 CPU。
+
+- 进程 $i$每运行一次，`stride_i` 增加 
+  $$
+  \Delta_i = BIG\_STRIDE/priority_i\
+  $$
+
+- 长期稳定后，各进程的 `stride` 会在一个相近的范围，可以考虑认为在一个 $BIG\_STRIDE$ 内“交替追赶”，否则某个进程的 `stride` **一直最小的话会追上来**。
+
+- 设在一段很长时间内，进程 ($i$) 获得了 ($N_i$\) 次“被选中”的机会，则它的累计 `stride` 增量约为：
+  $$
+  N_i \cdot \frac{BIG\_STRIDE}{priority_i}
+  $$
+  长期公平状态下，各进程的 `stride` 增量应大致“对齐”（大家都被拉到差不多的虚拟时间线），因此有近似关系：
+  $$
+  N_i \cdot \frac{1}{priority_i} \approx N_j \cdot \frac{1}{priority_j}
+  \Rightarrow \frac{N_i}{N_j} \approx \frac{priority_i}{priority_j}
+  $$
+  即 **获得时间片（被选中次数）与优先级成正比**。
+
+  其实，不同优先级 STRIDE 的增长是具有**周期性**的。
+
+  下面是图解（不妨设周期开始时，STRIDE是对齐的。同级目录下的图片`proof.png`，如果路径正常可以正常显示）。在一个 $BIG\_STRIDE$ 内，不同优先级的步长不一致：**优先级大，步长小，执行次数大**。
+
+![proof](proof.png)

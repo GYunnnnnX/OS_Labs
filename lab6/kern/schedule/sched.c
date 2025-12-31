@@ -52,7 +52,7 @@ void sched_init(void)
 {
     list_init(&timer_list);
 
-    sched_class = &default_sched_class;
+    sched_class = &stride_sched_class;
 
     rq = &__rq;
     rq->max_time_slice = MAX_TIME_SLICE;
