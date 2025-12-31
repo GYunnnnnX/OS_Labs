@@ -9,7 +9,7 @@
 
 /* You should define the BigStride constant here*/
 /* LAB6 CHALLENGE 1: 2311833 */
-#define BIG_STRIDE (1 << 20) /* you should give a value, and is 1 << 20 */
+#define BIG_STRIDE (1 << 30) /* you should give a value, and is 1 << 30 */
 
 /* The compare function for two skew_heap_node_t's and the
  * corresponding procs*/
