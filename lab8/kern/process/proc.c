@@ -698,7 +698,221 @@ load_icode(int fd, int argc, char **kargv)
      * (7) setup trapframe for user environment
      * (8) if up steps failed, you should cleanup the env.
      */
-    
+    // (1) 创建新的 mm（用户进程地址空间管理结构）
+    struct mm_struct *mm;
+    if ((mm = mm_create()) == NULL)
+    {
+        sysfile_close(fd);
+        return -E_NO_MEM;
+    }
+
+    int ret = -E_NO_MEM;
+    // (2) 建立新的页目录（pgdir），并让 mm->pgdir 指向它（初始复制内核映射）
+    if (setup_pgdir(mm) != 0)
+    {
+        goto bad_pgdir_cleanup_mm;
+    }
+
+    // (3) 读取 ELF 头部并校验格式
+    struct elfhdr elf;
+    if ((ret = load_icode_read(fd, &elf, sizeof(elf), 0)) != 0)
+    {
+        goto bad_elf_cleanup_pgdir;
+    }
+    if (elf.e_magic != ELF_MAGIC)
+    {
+        ret = -E_INVAL_ELF;
+        goto bad_elf_cleanup_pgdir;
+    }
+
+    uint32_t vm_flags, perm;
+    struct Page *page = NULL;
+    uintptr_t la;
+    int i;
+    // (4) 遍历 ELF Program Header，把可加载段映射到用户虚拟地址空间并把文件内容读入内存
+    for (i = 0; i < elf.e_phnum; i++)
+    {
+        struct proghdr ph;
+        off_t phoff = elf.e_phoff + i * sizeof(struct proghdr);
+        if ((ret = load_icode_read(fd, &ph, sizeof(ph), phoff)) != 0)
+        {
+            goto bad_cleanup_mmap;
+        }
+        if (ph.p_type != ELF_PT_LOAD)
+        {
+            continue;
+        }
+        if (ph.p_filesz > ph.p_memsz)
+        {
+            ret = -E_INVAL_ELF;
+            goto bad_cleanup_mmap;
+        }
+
+        // 由 ELF 段权限生成 vma 的 vm_flags 以及页表权限 perm（RISC-V 需要显式设置 PTE_R/W/X）
+        vm_flags = 0, perm = PTE_U | PTE_V;
+        if (ph.p_flags & ELF_PF_X)
+        {
+            vm_flags |= VM_EXEC;
+        }
+        if (ph.p_flags & ELF_PF_W)
+        {
+            vm_flags |= VM_WRITE;
+        }
+        if (ph.p_flags & ELF_PF_R)
+        {
+            vm_flags |= VM_READ;
+        }
+        if (vm_flags & VM_READ)
+        {
+            perm |= PTE_R;
+        }
+        if (vm_flags & VM_WRITE)
+        {
+            perm |= (PTE_W | PTE_R);
+        }
+        if (vm_flags & VM_EXEC)
+        {
+            perm |= PTE_X;
+        }
+
+        // 建立该段的虚拟内存区域（vma），后续按页分配物理页并把段内容读入
+        if ((ret = mm_map(mm, ph.p_va, ph.p_memsz, vm_flags, NULL)) != 0)
+        {
+            goto bad_cleanup_mmap;
+        }
+
+        uintptr_t start = ph.p_va, end;
+        la = ROUNDDOWN(start, PGSIZE);
+        off_t file_offset = ph.p_offset;
+
+        // 4.1) 把文件里的 TEXT/DATA 部分读入新分配的用户页
+        end = ph.p_va + ph.p_filesz;
+        while (start < end)
+        {
+            if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL)
+            {
+                ret = -E_NO_MEM;
+                goto bad_cleanup_mmap;
+            }
+            size_t off = start - la, size = PGSIZE - off;
+            la += PGSIZE;
+            if (end < la)
+            {
+                size -= la - end;
+            }
+            if ((ret = load_icode_read(fd, page2kva(page) + off, size, file_offset)) != 0)
+            {
+                goto bad_cleanup_mmap;
+            }
+            start += size;
+            file_offset += size;
+        }
+
+        // 4.2) BSS：对 filesz..memsz 的部分补 0（可能包含首尾零散，也可能跨多页）
+        end = ph.p_va + ph.p_memsz;
+        if (start < la)
+        {
+            if (start == end)
+            {
+                continue;
+            }
+            size_t off = start + PGSIZE - la, size = PGSIZE - off;
+            if (end < la)
+            {
+                size -= la - end;
+            }
+            memset(page2kva(page) + off, 0, size);
+            start += size;
+            assert((end < la && start == end) || (end >= la && start == la));
+        }
+        while (start < end)
+        {
+            if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL)
+            {
+                ret = -E_NO_MEM;
+                goto bad_cleanup_mmap;
+            }
+            size_t off = start - la, size = PGSIZE - off;
+            la += PGSIZE;
+            if (end < la)
+            {
+                size -= la - end;
+            }
+            memset(page2kva(page) + off, 0, size);
+            start += size;
+        }
+    }
+
+    // (5) 建立用户栈 vma，并在用户栈上构造 argc/argv
+    vm_flags = VM_READ | VM_WRITE | VM_STACK;
+    if ((ret = mm_map(mm, USTACKTOP - USTACKSIZE, USTACKSIZE, vm_flags, NULL)) != 0)
+    {
+        goto bad_cleanup_mmap;
+    }
+
+    // 先在栈顶向下“预排布”字符串的位置（uargv[i] 是每个参数字符串在用户栈中的地址）
+    uintptr_t uargv[EXEC_MAX_ARG_NUM + 1];
+    uintptr_t sp = USTACKTOP;
+    for (i = argc - 1; i >= 0; i--)
+    {
+        size_t len = strlen(kargv[i]) + 1;
+        sp -= len;
+        uargv[i] = sp;
+    }
+    uargv[argc] = 0;
+    sp = ROUNDDOWN(sp, sizeof(uintptr_t));
+    uintptr_t uargv_addr = sp - (argc + 1) * sizeof(uintptr_t);
+    sp = ROUNDDOWN(uargv_addr, 16);
+
+    // 确保从 sp 到 USTACKTOP 覆盖到的栈页都分配出来（避免后续 memcpy 触发缺页异常）
+    uintptr_t stack_start = ROUNDDOWN(sp, PGSIZE);
+    uintptr_t stack_end = USTACKTOP;
+    for (la = stack_start; la < stack_end; la += PGSIZE)
+    {
+        if (pgdir_alloc_page(mm->pgdir, la, PTE_USER) == NULL)
+        {
+            ret = -E_NO_MEM;
+            goto bad_cleanup_mmap;
+        }
+    }
+
+    // (6) 切换到新地址空间：current->mm / satp
+    mm_count_inc(mm);
+    current->mm = mm;
+    current->pgdir = PADDR(mm->pgdir);
+    lsatp(current->pgdir);
+
+    // 把参数字符串和 argv 指针数组真正写入用户栈
+    for (i = argc - 1; i >= 0; i--)
+    {
+        size_t len = strlen(kargv[i]) + 1;
+        memcpy((void *)uargv[i], kargv[i], len);
+    }
+    memcpy((void *)uargv_addr, uargv, (argc + 1) * sizeof(uintptr_t));
+
+    // (7) 设置 trapframe：让用户态从 ELF 入口开始执行，并把 a0/a1 设置成 argc/argv
+    struct trapframe *tf = current->tf;
+    uintptr_t sstatus = tf->status;
+    memset(tf, 0, sizeof(struct trapframe));
+    tf->gpr.sp = sp;
+    tf->gpr.a0 = argc;
+    tf->gpr.a1 = uargv_addr;
+    tf->epc = elf.e_entry;
+    tf->status = (sstatus & ~SSTATUS_SPP) | SSTATUS_SPIE;
+
+    sysfile_close(fd);
+    return 0;
+
+bad_cleanup_mmap:
+    // 出错清理：切回内核页表，再释放 mm/vma/pgdir
+    lsatp(boot_pgdir_pa);
+    exit_mmap(mm);
+bad_elf_cleanup_pgdir:
+    put_pgdir(mm);
+bad_pgdir_cleanup_mm:
+    mm_destroy(mm);
+    sysfile_close(fd);
+    return ret;
 }
 
 // this function isn't very correct in LAB8

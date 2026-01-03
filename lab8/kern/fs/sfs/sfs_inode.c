@@ -586,8 +586,10 @@ sfs_io_nolock(struct sfs_fs *sfs, struct sfs_inode *sin, void *buf, off_t offset
     int ret = 0;
     size_t size, alen = 0;
     uint32_t ino;
-    uint32_t blkno = offset / SFS_BLKSIZE;          // The NO. of Rd/Wr begin block
-    uint32_t nblks = endpos / SFS_BLKSIZE - blkno;  // The size of Rd/Wr blocks
+    off_t start_offset = offset;                  // 起始偏移：表示用户希望从文件哪里开始读/写（不随循环推进）
+    off_t cur_offset = offset;                    // 当前偏移：表示本次读/写推进到哪里（循环过程中会不断增加）
+    uint32_t blkno = cur_offset / SFS_BLKSIZE;          // The NO. of Rd/Wr begin block
+    uint32_t nblks = endpos / SFS_BLKSIZE - blkno;      // The size of Rd/Wr blocks
 
   //LAB8:EXERCISE1 YOUR CODE HINT: call sfs_bmap_load_nolock, sfs_rbuf, sfs_rblock,etc. read different kind of blocks in file
 	/*
@@ -599,13 +601,72 @@ sfs_io_nolock(struct sfs_fs *sfs, struct sfs_inode *sin, void *buf, off_t offset
      * (3) If end position isn't aligned with the last block, Rd/Wr some content from begin to the (endpos % SFS_BLKSIZE) of the last block
 	 *       NOTICE: useful function: sfs_bmap_load_nolock, sfs_buf_op	
 	*/
+    blkoff = cur_offset % SFS_BLKSIZE;            // 在首个块内的偏移（决定是否需要先处理“首块非对齐”）
+    char *cbuf = buf;
+    if (blkoff != 0) {
+        // (1) 首块非对齐：只读/写从 cur_offset 到该块末尾（或到 endpos 为止）
+        size = (nblks != 0) ? (SFS_BLKSIZE - blkoff) : (endpos - cur_offset);
+        if ((ret = sfs_bmap_load_nolock(sfs, sin, blkno, &ino)) != 0) {
+            goto out;
+        }
+        if ((ret = sfs_buf_op(sfs, cbuf, size, ino, blkoff)) != 0) {
+            goto out;
+        }
+        alen += size;
+        cbuf += size;
+        cur_offset += size;
+        blkno++;
+        if (nblks != 0) {
+            nblks--;
+        }
+    }
 
-    
+    while (nblks != 0) {
+        // (2) 中间整块：优先合并连续的物理块，一次性调用 sfs_block_op 读/写多个块，提高效率
+        size_t run_blks = 0;
+        uint32_t run_ino = 0;
+        while (run_blks < nblks) {
+            if ((ret = sfs_bmap_load_nolock(sfs, sin, blkno + run_blks, &ino)) != 0) {
+                goto out;
+            }
+            if (run_blks == 0) {
+                run_ino = ino;
+                run_blks = 1;
+                continue;
+            }
+            if (ino != run_ino + run_blks) {
+                break;
+            }
+            run_blks++;
+        }
+        if ((ret = sfs_block_op(sfs, cbuf, run_ino, run_blks)) != 0) {
+            goto out;
+        }
+        size = run_blks * SFS_BLKSIZE;
+        alen += size;
+        cbuf += size;
+        cur_offset += size;
+        blkno += run_blks;
+        nblks -= run_blks;
+    }
+
+    size = endpos - cur_offset;
+    if (size != 0) {
+        // (3) 末块非对齐：只读/写最后一个块的前 size 字节
+        if ((ret = sfs_bmap_load_nolock(sfs, sin, blkno, &ino)) != 0) {
+            goto out;
+        }
+        if ((ret = sfs_buf_op(sfs, cbuf, size, ino, 0)) != 0) {
+            goto out;
+        }
+        alen += size;
+    }
 
 out:
     *alenp = alen;
-    if (offset + alen > sin->din->size) {
-        sin->din->size = offset + alen;
+    if (start_offset + alen > sin->din->size) {
+        // 注意：这里必须用起始偏移 start_offset（不能用已经推进过的 cur_offset），否则会把 alen 计算重复
+        sin->din->size = start_offset + alen;
         sin->dirty = 1;
     }
     return ret;
