@@ -277,6 +277,7 @@ void proc_run(struct proc_struct *proc)
     struct proc_struct *prev = current;
     current = proc;
     lsatp(proc->pgdir);
+    flush_tlb();
     switch_to(&(prev->context), &(proc->context));
     local_intr_restore(intr_flag);
 }
@@ -553,10 +554,14 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
     current->wait_state = 0;
     proc->parent = current;
     proc->pid = get_pid();
+    if (copy_files(clone_flags, proc) != 0)
+    {
+        goto bad_fork_cleanup_proc;
+    }
     // 调用函数setup_kstack()和copy_mm()，并且检查运行结果
     if (setup_kstack(proc) != 0)
     {
-        goto bad_fork_cleanup_proc;
+        goto bad_fork_cleanup_fs;
     }
     if (copy_mm(clone_flags, proc) != 0)
     {
@@ -570,12 +575,7 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
     // 唤醒进程
     wakeup_proc(proc);
     ret = proc->pid;
- 
-    if (copy_files(clone_flags, proc) != 0)
-    { // for LAB8
-        goto bad_fork_cleanup_kstack;
-    }
-    
+
 fork_out:
     return ret;
 
@@ -606,6 +606,7 @@ int do_exit(int error_code)
     if (mm != NULL)
     {
         lsatp(boot_pgdir_pa);
+        flush_tlb();
         if (mm_count_dec(mm) == 0)
         {
             exit_mmap(mm);
@@ -881,6 +882,7 @@ load_icode(int fd, int argc, char **kargv)
     current->mm = mm;
     current->pgdir = PADDR(mm->pgdir);
     lsatp(current->pgdir);
+    flush_tlb();
 
     // 把参数字符串和 argv 指针数组真正写入用户栈
     for (i = argc - 1; i >= 0; i--)
