@@ -133,8 +133,32 @@ out:
 - `sfs_rbuf`：读“块内的一段”（非对齐读）→ [sfs_io.c](file:///home/lin/workspace/OS_Labs/lab8/kern/fs/sfs/sfs_io.c#L74-L94)
 - `sfs_rblock`：读“整块/多块”（对齐读）→ [sfs_io.c](file:///home/lin/workspace/OS_Labs/lab8/kern/fs/sfs/sfs_io.c#L1-L49)
 
+
+
 ## 练习2：完成基于文件系统的执行程序机制的实现
 
-## 扩展练习 Challenge1：完成基于“UNIX的PIPE机制”的设计方案
+> 改写proc.c中的load_icode函数和其他相关函数，实现基于文件系统的执行程序机制。执行：make qemu。如果能看看到sh用户程序的执行界面，则基本成功了。如果在sh用户界面上可以执行exit, hello（更多用户程序放在user目录下）等其他放置在sfs文件系统中的其他执行程序，则可以认为本实验基本成功。
 
-## 扩展练习 Challenge2：完成基于“UNIX的软连接和硬连接机制”的设计方案
+本练习的本质上是将 uCore 中“执行用户程序”的机制，从 **LAB5 中依赖内存中固化二进制的方式**，改造为 **通过文件系统按路径加载 ELF 并执行**。
+
+### 1. 整体执行链路
+
+在本次实验中，用户态程序（如 `sh`）通过 `exec(path, argv)` 请求内核执行新程序。系统调用进入内核后，经由`SYS_exec → sys_exec → do_execve(name, argc, argv)`完成参数处理与资源整理。随后 `do_execve` 使用文件系统接口 `sysfile_open` 打开路径对应的可执行文件，得到文件描述符 `fd`，并调用 `load_icode(fd, argc, kargv)` 完成 ELF 装载。
+
+`load_icode` 在内核态为当前进程建立全新的用户地址空间，装载程序段、构造用户栈与参数，并设置好 trapframe。当内核通过 trap 返回路径离开后，CPU 切换到用户态，从 ELF 入口地址开始执行新程序。该链路跑通后，用户在 `sh` 中输入命令即可触发完整的 exec 流程。
+
+### 2. do_execve：作为 exec 的准备阶段
+
+这个函数的职责本质上就是“为装载新程序清场并准备安全环境”。在实现中，它首先检查 `argc` 的合法性，并通过 `copy_string` / `copy_kargv` 把程序名与参数从用户空间拷贝到内核缓冲区。这一步的目的是避免在后续释放旧用户地址空间后，内核仍访问失效的用户指针。
+
+随后，`do_execve` 关闭当前进程打开的文件（本实验中采用全部关闭的简化策略），并使用 `argv[0]` 作为路径调用 `sysfile_open` 打开可执行文件。若当前进程已有用户地址空间，则先切回内核页表，再按引用计数依次释放旧的用户映射、页表和 `mm_struct`，使进程回到“空壳待装载”的状态。完成这些准备后，`do_execve` 调用 `load_icode` 进入真正的装载阶段。
+
+### 3. load_icode：从文件系统装载 ELF 并建立用户环境
+
+`load_icode` 是本练习的核心。其核心目标是 **为 CPU 构造一个可以直接运行用户程序的完整用户环境**。实现上，函数首先创建新的 `mm_struct` 并建立页表根，保留必要的内核映射。随后通过`load_icode_read`（基于 `fd` 的带偏移读封装）读取并校验 ELF Header，再遍历 Program Header 表，仅处理 `PT_LOAD` 段。对每个可加载段，我们根据 ELF 的段权限生成对应的 `vm_flags` 和页表权限，先用 `mm_map` 建立 vma，再按页分配物理内存并将文件中的段内容读入；对 `filesz` 之外的部分（BSS）则显式清零。
+
+完成各段装载后，`load_icode` 建立用户栈的 vma，并在栈顶向下布局参数字符串和 `argv` 指针数组，完成必要的对齐。为了避免在 exec 路径中触发缺页异常，我们会提前分配覆盖到的栈页。随后将新建的 `mm` 安装到当前进程并切换页表（更新 satp/CR3 并刷新 TLB），在新地址空间下把参数字符串和指针数组真正写入用户栈。
+
+最后，函数重置当前进程的 trapframe：设置 `epc` 为 ELF 入口地址，`sp` 为用户栈顶，并按调用约定把 `argc` 和 `argv` 地址放入寄存器，同时清除特权级相关标志以确保 trap 返回后进入用户态。至此，`load_icode` 完成，内核返回后新程序即可开始执行。
+
+![image-20260104182305673](./img/image-20260104182305673.png)
