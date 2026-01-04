@@ -42,7 +42,7 @@ int
 sysfile_open(const char *__path, uint32_t open_flags) {
     int ret;
     char *path;
-    if ((ret = copy_path(&path, __path)) != 0) {
+    if ((ret = copy_path(&path, __path)) != 0) {//copy_path失败 返回错误码不为0
         return ret;
     }
     ret = file_open(path, open_flags);
@@ -59,39 +59,41 @@ sysfile_close(int fd) {
 /* sysfile_read - read file */
 int
 sysfile_read(int fd, void *base, size_t len) {
+    //（1）检查参数是否合法
     struct mm_struct *mm = current->mm;
     if (len == 0) {
         return 0;
     }
-    if (!file_testfd(fd, 1, 0)) {
+    if (!file_testfd(fd, 1, 0)) {//检查文件描述符 fd 是否可读
         return -E_INVAL;
     }
-    void *buffer;
+    //（2）分配一个 IOBUF_SIZE 大小的缓冲区 buffer
+    void *buffer;//分配一个 IOBUF_SIZE 大小的缓冲区 buffer
     if ((buffer = kmalloc(IOBUF_SIZE)) == NULL) {
         return -E_NO_MEM;
     }
-
+    //（3）循环读取文件内容到缓冲区 buffer 中，直到读取完 len 字节或遇到错误
     int ret = 0;
     size_t copied = 0, alen;
     while (len != 0) {
-        if ((alen = IOBUF_SIZE) > len) {
+        if ((alen = IOBUF_SIZE) > len) { //alen=min(IOBUF_SIZE, len)
             alen = len;
         }
-        ret = file_read(fd, buffer, alen, &alen);
-        if (alen != 0) {
+        ret = file_read(fd, buffer, alen, &alen);//调用文件系统实现的 file_read 读取数据到缓冲区 buffer 中
+        if (alen != 0) {//如果成功读取到 alen 字节 把它复制到用户空间的 base 地址
             lock_mm(mm);
             {
                 if (copy_to_user(mm, base, buffer, alen)) {
                     assert(len >= alen);
-                    base += alen, len -= alen, copied += alen;
+                    base += alen, len -= alen, copied += alen;//更新 base、len、copied 指针，准备读取下一个 alen 字节
                 }
-                else if (ret == 0) {
+                else if (ret == 0) {//如果拷贝失败且ret==0 文件读没错，但用户指针非法/不可写
                     ret = -E_INVAL;
                 }
             }
             unlock_mm(mm);
         }
-        if (ret != 0 || alen == 0) {
+        if (ret != 0 || alen == 0) {//出错或者读完就跳出循环
             goto out;
         }
     }

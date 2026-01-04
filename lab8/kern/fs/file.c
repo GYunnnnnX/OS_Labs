@@ -155,6 +155,7 @@ file_testfd(int fd, bool readable, bool writable) {
 // open file
 int
 file_open(char *path, uint32_t open_flags) {
+    //（1）是否可读可写
     bool readable = 0, writable = 0;
     switch (open_flags & O_ACCMODE) {
     case O_RDONLY: readable = 1; break;
@@ -163,32 +164,36 @@ file_open(char *path, uint32_t open_flags) {
         readable = writable = 1;
         break;
     default:
-        return -E_INVAL;
+        return -E_INVAL;//参数非法的错误码：3
     }
+    //（2）为进程分配一个空闲fd表项 暂时占位 后续open成功后会替换为实际fd
     int ret;
     struct file *file;
     if ((ret = fd_array_alloc(NO_FD, &file)) != 0) {
-        return ret;
+        return ret;//返回错误码
     }
+    //（3）调用VFS打开文件 获得inode
     struct inode *node;
     if ((ret = vfs_open(path, open_flags, &node)) != 0) {
-        fd_array_free(file);
-        return ret;
+        fd_array_free(file);//open失败 释放fd表项
+        return ret;//返回错误码
     }
-    file->pos = 0;
-    if (open_flags & O_APPEND) {
+    //（4）设置文件指针为0 或 追加到文件末尾
+    file->pos = 0;//当前读写位置
+    if (open_flags & O_APPEND) {//O_APPEND表示写入总是追加到文件末尾
         struct stat __stat, *stat = &__stat;
-        if ((ret = vop_fstat(node, stat)) != 0) {
+        if ((ret = vop_fstat(node, stat)) != 0) {//调用VFS接口获取文件的统计信息（包括文件大小）
             vfs_close(node);
             fd_array_free(file);
             return ret;
         }
-        file->pos = stat->st_size;
+        file->pos = stat->st_size;//把文件指针设置为文件末尾
     }
-    file->node = node;
+    //（5）把 inode 和权限挂到 fd 表项上，并把表项从 INIT 变为 OPENED
+    file->node = node;//fd 表项关联到具体文件（inode）
     file->readable = readable;
     file->writable = writable;
-    fd_array_open(file);
+    fd_array_open(file);//把 fd 状态切到 FD_OPENED
     return file->fd;
 }
 
@@ -210,23 +215,23 @@ file_read(int fd, void *base, size_t len, size_t *copied_store) {
     int ret;
     struct file *file;
     *copied_store = 0;
-    if ((ret = fd2file(fd, &file)) != 0) {
+    if ((ret = fd2file(fd, &file)) != 0) {//检查 fd 合法、并拿到对应的 struct file *
         return ret;
     }
     if (!file->readable) {
         return -E_INVAL;
     }
-    fd_array_acquire(file);
+    fd_array_acquire(file);//获取文件锁 确保并发安全
 
-    struct iobuf __iob, *iob = iobuf_init(&__iob, base, len, file->pos);
-    ret = vop_read(file->node, iob);
+    struct iobuf __iob, *iob = iobuf_init(&__iob, base, len, file->pos);//构造 iobuf 并下沉到 VFS
+    ret = vop_read(file->node, iob);//调用文件系统实现的 vop_read 读取数据到 iobuf 中
 
-    size_t copied = iobuf_used(iob);
-    if (file->status == FD_OPENED) {
+    size_t copied = iobuf_used(iob);//从 iobuf 里取“实际完成的字节数”
+    if (file->status == FD_OPENED) {//只有在 file->status == FD_OPENED 时才推进 file->pos += copied
         file->pos += copied;
     }
     *copied_store = copied;
-    fd_array_release(file);
+    fd_array_release(file);//释放文件锁
     return ret;
 }
 
